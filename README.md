@@ -7,7 +7,7 @@ Installer and deployment helper for the **backlight-linux** GUI that controls th
 | Path | Purpose |
 | --- | --- |
 | `source/` | Upstream scripts (GUI, restore helper, power monitor) and the `assets/` data copied into `/usr/share/xmg-backlight` by the installer. |
-| `installer/` | The `install.py` script plus any helper assets required only during installation. |
+| `install.py` | Top-level installer script to run with sudo. |
 | `.gitignore` | Local development exclusions (bytecode, build artifacts, IDE files, etc.). |
 
 ## Requirements
@@ -19,10 +19,10 @@ Installer and deployment helper for the **backlight-linux** GUI that controls th
 
 ## Installation
 
-1. Clone the repository and enter the installer directory:
+1. Clone the repository and enter the project directory:
    ```bash
    git clone https://github.com/<your-account>/xmg_backlight_installer.git
-   cd xmg_backlight_installer/installer
+   cd xmg_backlight_installer
    ```
 2. Run the installer as root:
    ```bash

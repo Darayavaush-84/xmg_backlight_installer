@@ -40,7 +40,7 @@ FEDORA_NOTICE = (
 )
 
 BASE_DIR = Path(__file__).resolve().parent
-SOURCE_DIR = (BASE_DIR / ".." / "source").resolve()
+SOURCE_DIR = (BASE_DIR / "source").resolve()
 FILES_TO_DEPLOY = [
     "keyboard_backlight.py",
     "restore_profile.py",
