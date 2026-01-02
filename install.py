@@ -9,6 +9,7 @@ with sudo/root privileges.
 
 from __future__ import annotations
 
+import argparse
 import filecmp
 import os
 import shutil
@@ -39,6 +40,8 @@ FEDORA_NOTICE = (
     "This installer has been tested on Fedora. Other distributions have not "
     "been validated and may require manual adjustments."
 )
+LOG_MAX_SIZE_BYTES = 512 * 1024  # 512 KB
+LOG_FILE_PATH = Path("/tmp/xmg-backlight-resume.log")
 
 BASE_DIR = Path(__file__).resolve().parent
 SOURCE_DIR = (BASE_DIR / "source").resolve()
@@ -317,9 +320,20 @@ def create_system_sleep_hook() -> None:
         #!/usr/bin/env sh
         set -eu
         LOGFILE="/tmp/xmg-backlight-resume.log"
+        LOG_MAX_SIZE={LOG_MAX_SIZE_BYTES}
         phase="${{1:-}}"
         operation="${{2:-unknown}}"
         timestamp="$(date)"
+
+        # Log rotation: truncate if exceeds max size
+        if [ -f "$LOGFILE" ]; then
+          log_size=$(stat -c%s "$LOGFILE" 2>/dev/null || echo 0)
+          if [ "$log_size" -gt "$LOG_MAX_SIZE" ]; then
+            tail -c "$((LOG_MAX_SIZE / 2))" "$LOGFILE" > "$LOGFILE.tmp" 2>/dev/null && mv "$LOGFILE.tmp" "$LOGFILE" || true
+            printf "%s: log rotated (was %s bytes)\\n" "$(date)" "$log_size" >> "$LOGFILE"
+          fi
+        fi
+
         printf "%s: hook called with phase=%s op=%s\\n" "$timestamp" "$phase" "$operation" >> "$LOGFILE"
         if [ "$phase" != "post" ]; then
           exit 0
@@ -392,9 +406,65 @@ def reload_systemd_daemon() -> None:
     run(["systemctl", "daemon-reload"], check=False)
 
 
+def uninstall() -> None:
+    """Remove all installed files and configurations."""
+    log("Starting uninstallation...")
+    
+    # Remove systemd drop-ins
+    for service, _ in SYSTEMD_SERVICE_DROPINS:
+        dropin_dir = Path("/etc/systemd/system") / f"{service}.d"
+        dropin_path = dropin_dir / DROPIN_FILENAME
+        if dropin_path.exists():
+            dropin_path.unlink()
+            log(f"Removed {dropin_path}")
+        if dropin_dir.exists() and not any(dropin_dir.iterdir()):
+            dropin_dir.rmdir()
+            log(f"Removed empty directory {dropin_dir}")
+    
+    # Remove files
+    paths_to_remove = [
+        RESUME_HELPER_PATH,
+        SYSTEM_SLEEP_HOOK_PATH,
+        AUTOSTART_PATH,
+        DESKTOP_PATH,
+        WRAPPER_PATH,
+    ]
+    for path in paths_to_remove:
+        if path.exists():
+            path.unlink()
+            log(f"Removed {path}")
+    
+    # Remove share directory
+    if SHARE_DIR.exists():
+        shutil.rmtree(SHARE_DIR)
+        log(f"Removed {SHARE_DIR}")
+    
+    # Reload systemd
+    reload_systemd_daemon()
+    
+    log("Uninstallation completed.")
+    log("Note: pip packages (ite8291r3-ctl, PySide6) were NOT removed.")
+    log("To remove them manually: pip uninstall ite8291r3-ctl PySide6")
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="XMG Backlight Management installer/uninstaller."
+    )
+    parser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Remove all installed files and configurations.",
+    )
+    args = parser.parse_args()
+
     log(FEDORA_NOTICE)
     require_root()
+
+    if args.uninstall:
+        uninstall()
+        return
+
     detect_driver()
     probe_keyboard_hardware()
     ensure_runtime_dependency()

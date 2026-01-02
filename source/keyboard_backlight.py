@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import atexit
+import fcntl
 import html
 import json
 import os
@@ -11,7 +13,7 @@ import time
 from PySide6 import QtCore, QtWidgets, QtGui
 
 APP_DISPLAY_NAME = "XMG Backlight Management"
-NOTIFICATION_TIMEOUT_MS = 2200
+NOTIFICATION_TIMEOUT_MS = 1500
 TOOL_ENV_VAR = "ITE8291R3_CTL"
 TOOL_CANDIDATES = [
     os.environ.get(TOOL_ENV_VAR),
@@ -59,6 +61,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "backlight-linux")
 PROFILE_PATH = os.path.join(CONFIG_DIR, "profile.json")
 SETTINGS_PATH = os.path.join(CONFIG_DIR, "settings.json")
+LOCK_FILE_PATH = os.path.join(CONFIG_DIR, "app.lock")
 RESTORE_SCRIPT = os.path.join(BASE_DIR, "restore_profile.py")
 POWER_MONITOR_SCRIPT = os.path.join(BASE_DIR, "power_state_monitor.py")
 AUTOSTART_DIR = os.path.join(os.path.expanduser("~"), ".config", "autostart")
@@ -86,6 +89,7 @@ DEFAULT_PROFILE_STATE = {
 DEFAULT_SETTINGS = {
     "start_in_tray": False,
     "show_notifications": True,
+    "dark_mode": False,
 }
 
 
@@ -101,6 +105,35 @@ def ensure_config_dir():
     os.makedirs(CONFIG_DIR, exist_ok=True)
 
 
+def acquire_single_instance_lock():
+    """Try to acquire an exclusive lock. Returns the file handle if successful, None otherwise."""
+    ensure_config_dir()
+    try:
+        lock_file = open(LOCK_FILE_PATH, "w", encoding="utf-8")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file.write(str(os.getpid()))
+        lock_file.flush()
+        atexit.register(release_single_instance_lock, lock_file)
+        return lock_file
+    except (IOError, OSError):
+        return None
+
+
+def release_single_instance_lock(lock_file):
+    """Release the lock file and remove it."""
+    if lock_file is None:
+        return
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+    except (IOError, OSError):
+        pass
+    try:
+        os.remove(LOCK_FILE_PATH)
+    except (IOError, OSError):
+        pass
+
+
 def read_settings_file():
     try:
         with open(SETTINGS_PATH, "r", encoding="utf-8") as handle:
@@ -113,9 +146,16 @@ def read_settings_file():
 def write_settings_file(data):
     ensure_config_dir()
     tmp_path = SETTINGS_PATH + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=2)
-    os.replace(tmp_path, SETTINGS_PATH)
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+        os.replace(tmp_path, SETTINGS_PATH)
+    except OSError:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def sanitize_settings(data):
@@ -126,6 +166,7 @@ def sanitize_settings(data):
     base["show_notifications"] = bool(
         data.get("show_notifications", base["show_notifications"])
     )
+    base["dark_mode"] = bool(data.get("dark_mode", base["dark_mode"]))
     return base
 
 
@@ -146,9 +187,16 @@ def read_profile_file():
 def write_profile_file(data):
     ensure_config_dir()
     tmp_path = PROFILE_PATH + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=2)
-    os.replace(tmp_path, PROFILE_PATH)
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+        os.replace(tmp_path, PROFILE_PATH)
+    except OSError:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def sanitize_choice(value, options, fallback):
@@ -208,14 +256,15 @@ def ensure_autostart_dir():
 
 
 def autostart_entry_contents():
-    exec_path = shlex.quote(RESTORE_SCRIPT)
+    gui_script = os.path.join(BASE_DIR, "keyboard_backlight.py")
+    exec_cmd = f"{shlex.quote(PYTHON_EXECUTABLE)} {shlex.quote(gui_script)}"
     return (
         "[Desktop Entry]\n"
         "Type=Application\n"
-        "Name=Keyboard Backlight Restore\n"
-        f"Exec={exec_path}\n"
+        f"Name={APP_DISPLAY_NAME}\n"
+        f"Exec={exec_cmd}\n"
         "X-GNOME-Autostart-enabled=true\n"
-        "Comment=Restore the last keyboard backlight profile on login.\n"
+        "Comment=Start keyboard backlight manager minimized in system tray.\n"
     )
 
 
@@ -530,7 +579,7 @@ class Main(QtWidgets.QWidget):
     def __init__(self, *, enable_tray=True):
         super().__init__()
         self.setWindowTitle(APP_DISPLAY_NAME)
-        self.resize(720, 520)
+        self.resize(980, 500)
 
         QtWidgets.QApplication.setStyle("Fusion")
         QtWidgets.QApplication.setQuitOnLastWindowClosed(False)
@@ -553,6 +602,9 @@ class Main(QtWidgets.QWidget):
         self.active_profile_name = self.profile_store["active"]
         self.profile_data = dict(self.profile_store["profiles"][self.active_profile_name])
         self.autostart_enabled = is_autostart_enabled()
+        if self.autostart_enabled and not self.settings.get("start_in_tray", False):
+            self.settings["start_in_tray"] = True
+            self.save_settings()
         self.resume_enabled = False
         self.resume_status = "Unknown"
         status_enabled, status_text = is_resume_service_enabled()
@@ -571,50 +623,93 @@ class Main(QtWidgets.QWidget):
                 self.profile_data.get("static_color"), COLORS, self.last_static_color
             )
 
+        self.setObjectName("MainView")
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(12)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        header_card = QtWidgets.QFrame()
-        header_card.setObjectName("hardwareCard")
-        header_layout = QtWidgets.QHBoxLayout(header_card)
-        header_layout.setContentsMargins(16, 12, 16, 12)
-        header_layout.setSpacing(12)
+        surface = QtWidgets.QFrame()
+        surface.setObjectName("AppSurface")
+        surface_layout = QtWidgets.QVBoxLayout(surface)
+        surface_layout.setContentsMargins(28, 28, 28, 28)
+        surface_layout.setSpacing(22)
+        root.addWidget(surface)
 
-        hardware_title = QtWidgets.QLabel("Detected hardware")
-        hardware_title.setObjectName("hardwareTitle")
-        header_layout.addWidget(hardware_title)
+        hero_card = QtWidgets.QFrame()
+        hero_card.setObjectName("heroCard")
+        hero_layout = QtWidgets.QHBoxLayout(hero_card)
+        hero_layout.setContentsMargins(32, 28, 32, 28)
+        hero_layout.setSpacing(24)
 
+        hero_text = QtWidgets.QVBoxLayout()
+        hero_text.setSpacing(6)
+        hero_title = QtWidgets.QLabel(APP_DISPLAY_NAME)
+        hero_title.setObjectName("heroTitle")
+        hero_subtitle = QtWidgets.QLabel(
+            "Light up your keyboard with curated profiles and thoughtful automations."
+        )
+        hero_subtitle.setWordWrap(True)
+        hero_subtitle.setObjectName("heroSubtitle")
+        hero_text.addWidget(hero_title)
+        hero_text.addWidget(hero_subtitle)
+
+        hardware_row = QtWidgets.QHBoxLayout()
+        hardware_row.setSpacing(8)
+        hardware_caption = QtWidgets.QLabel("Hardware")
+        hardware_caption.setObjectName("heroCaption")
         self.hardware_label = QtWidgets.QLabel("Hardware: unknown")
         self.hardware_label.setWordWrap(True)
-        self.hardware_label.setObjectName("hardwareValue")
-        header_layout.addWidget(self.hardware_label, 1)
+        self.hardware_label.setObjectName("hardwareBadge")
+        hardware_row.addWidget(hardware_caption)
+        hardware_row.addWidget(self.hardware_label, 1)
+        hero_text.addLayout(hardware_row)
 
-        self.log_toggle_button = QtWidgets.QPushButton("Show log")
+        hero_layout.addLayout(hero_text, 1)
+
+        hero_controls = QtWidgets.QVBoxLayout()
+        hero_controls.setSpacing(12)
+        hero_controls.addStretch(1)
+        self.log_toggle_button = QtWidgets.QPushButton("Show activity log")
         self.log_toggle_button.setCheckable(True)
-        header_layout.addWidget(self.log_toggle_button)
+        self.log_toggle_button.setObjectName("pillButton")
+        hero_controls.addWidget(self.log_toggle_button, 0, QtCore.Qt.AlignRight)
+        hero_layout.addLayout(hero_controls)
 
-        root.addWidget(header_card)
+        surface_layout.addWidget(hero_card)
 
-        self.console_box = QtWidgets.QGroupBox("Activity log")
-        cl = QtWidgets.QVBoxLayout(self.console_box)
-        cl.setContentsMargins(8, 12, 8, 8)
+        content_layout = QtWidgets.QHBoxLayout()
+        content_layout.setSpacing(20)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        surface_layout.addLayout(content_layout)
 
-        self.console = QtWidgets.QTextEdit()
-        self.console.setReadOnly(True)
-        self.console.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
-        cl.addWidget(self.console, 1)
+        left_col = QtWidgets.QVBoxLayout()
+        left_col.setSpacing(20)
+        content_layout.addLayout(left_col, 1)
+        right_col = QtWidgets.QVBoxLayout()
+        right_col.setSpacing(20)
+        content_layout.addLayout(right_col, 1)
 
-        self.console_box.setVisible(False)
-        root.addWidget(self.console_box)
-        self.log_toggle_button.toggled.connect(self.on_log_toggle_toggled)
+        brightness_card = QtWidgets.QFrame()
+        brightness_card.setObjectName("surfaceCard")
+        bc_layout = QtWidgets.QVBoxLayout(brightness_card)
+        bc_layout.setContentsMargins(24, 24, 24, 24)
+        bc_layout.setSpacing(18)
 
-        global_box = QtWidgets.QGroupBox("Brightness & power")
-        gl = QtWidgets.QGridLayout(global_box)
+        bright_title = QtWidgets.QLabel("Brightness & power")
+        bright_title.setObjectName("sectionTitle")
+        bc_layout.addWidget(bright_title)
+
+        bright_caption = QtWidgets.QLabel("Control intensity (0–50) and toggle the keyboard instantly.")
+        bright_caption.setObjectName("sectionSubtitle")
+        bright_caption.setWordWrap(True)
+        bc_layout.addWidget(bright_caption)
+
+        gl = QtWidgets.QGridLayout()
         gl.setColumnStretch(1, 1)
+        gl.setHorizontalSpacing(16)
+        gl.setVerticalSpacing(12)
 
-        gl.addWidget(QtWidgets.QLabel("Brightness (0–50)"), 0, 0)
-
+        gl.addWidget(QtWidgets.QLabel("Value"), 0, 0)
         self.b_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.b_slider.setRange(0, 50)
         self.b_slider.setValue(self.last_brightness)
@@ -622,22 +717,36 @@ class Main(QtWidgets.QWidget):
 
         self.b_spin = QtWidgets.QSpinBox()
         self.b_spin.setRange(0, 50)
+        self.b_spin.setButtonSymbols(QtWidgets.QSpinBox.NoButtons)
+        self.b_spin.setFixedWidth(80)
         self.b_spin.setValue(self.last_brightness)
         gl.addWidget(self.b_spin, 0, 2)
+        bc_layout.addLayout(gl)
 
-        self.btn_power = QtWidgets.QPushButton()
-        gl.addWidget(self.btn_power, 1, 0, 1, 3)
+        self.btn_power = QtWidgets.QPushButton("Turn on")
+        self.btn_power.setObjectName("powerButton")
+        self.btn_power.setMinimumHeight(52)
+        bc_layout.addWidget(self.btn_power)
 
-        root.addWidget(global_box)
+        left_col.addWidget(brightness_card)
 
-        mode_box = QtWidgets.QGroupBox("Mode")
-        ml = QtWidgets.QGridLayout(mode_box)
-        ml.setColumnStretch(1, 1)
+        mode_card = QtWidgets.QFrame()
+        mode_card.setObjectName("surfaceCard")
+        mode_layout = QtWidgets.QVBoxLayout(mode_card)
+        mode_layout.setContentsMargins(24, 24, 24, 24)
+        mode_layout.setSpacing(18)
+
+        mode_title = QtWidgets.QLabel("Effects & colors")
+        mode_title.setObjectName("sectionTitle")
+        mode_layout.addWidget(mode_title)
+
+        mode_caption = QtWidgets.QLabel("Pick static hues or animated scenes with direction and reactivity.")
+        mode_caption.setWordWrap(True)
+        mode_caption.setObjectName("sectionSubtitle")
+        mode_layout.addWidget(mode_caption)
 
         mode_row = QtWidgets.QHBoxLayout()
-        mode_row.setContentsMargins(0, 0, 0, 0)
-        mode_row.setSpacing(12)
-
+        mode_row.setSpacing(16)
         mode_row.addWidget(QtWidgets.QLabel("Effect"))
         self.mode = QtWidgets.QComboBox()
         self.mode.addItems(EFFECTS)
@@ -650,44 +759,59 @@ class Main(QtWidgets.QWidget):
         self.static_color.addItems(COLORS)
         self.static_color.setCurrentText(self.last_static_color)
         mode_row.addWidget(self.static_color, 1)
-
-        mode_row.addStretch(1)
-        ml.addLayout(mode_row, 0, 0, 1, 4)
+        mode_layout.addLayout(mode_row)
 
         self.effect_panel = QtWidgets.QWidget()
         epl = QtWidgets.QGridLayout(self.effect_panel)
         epl.setContentsMargins(0, 0, 0, 0)
-        epl.setHorizontalSpacing(10)
-        epl.setVerticalSpacing(8)
+        epl.setHorizontalSpacing(16)
+        epl.setVerticalSpacing(12)
 
         epl.addWidget(QtWidgets.QLabel("Speed (0–10)"), 0, 0)
         self.speed = QtWidgets.QSpinBox()
         self.speed.setRange(0, 10)
         self.speed.setValue(5)
+        self.speed.setButtonSymbols(QtWidgets.QSpinBox.NoButtons)
         epl.addWidget(self.speed, 0, 1)
 
-        epl.addWidget(QtWidgets.QLabel("Color"), 0, 2)
+        epl.addWidget(QtWidgets.QLabel("Dynamic color"), 0, 2)
         self.color = QtWidgets.QComboBox()
         self.color.addItems(["none"] + COLORS)
         self.color.setCurrentText("none")
         epl.addWidget(self.color, 0, 3)
 
-        self.reactive = QtWidgets.QCheckBox("Reactive (-r)")
+        self.reactive = QtWidgets.QCheckBox("Reactive mode (-r)")
         epl.addWidget(self.reactive, 1, 1)
 
+        epl.addWidget(QtWidgets.QLabel("Direction"), 1, 2)
         self.direction = QtWidgets.QComboBox()
         self.direction.addItems(DIRECTIONS)
         self.direction.setCurrentText("none")
         epl.addWidget(self.direction, 1, 3)
 
-        ml.addWidget(self.effect_panel, 1, 0, 1, 4)
+        mode_layout.addWidget(self.effect_panel)
+        right_col.addWidget(mode_card)
 
-        root.addWidget(mode_box)
+        profiles_card = QtWidgets.QFrame()
+        profiles_card.setObjectName("surfaceCard")
+        profiles_layout = QtWidgets.QVBoxLayout(profiles_card)
+        profiles_layout.setContentsMargins(24, 24, 24, 24)
+        profiles_layout.setSpacing(16)
 
-        profiles_box = QtWidgets.QGroupBox("Profiles")
-        pl = QtWidgets.QGridLayout(profiles_box)
+        profiles_title = QtWidgets.QLabel("Quick profiles")
+        profiles_title.setObjectName("sectionTitle")
+        profiles_layout.addWidget(profiles_title)
+
+        profiles_caption = QtWidgets.QLabel("Save your presets and recall them in one click.")
+        profiles_caption.setWordWrap(True)
+        profiles_caption.setObjectName("sectionSubtitle")
+        profiles_layout.addWidget(profiles_caption)
+
+        pl = QtWidgets.QGridLayout()
         pl.setColumnStretch(1, 1)
-        pl.addWidget(QtWidgets.QLabel("Profile"), 0, 0)
+        pl.setHorizontalSpacing(12)
+        pl.setVerticalSpacing(10)
+        pl.addWidget(QtWidgets.QLabel("Active profile"), 0, 0)
         self.profile_combo = QtWidgets.QComboBox()
         pl.addWidget(self.profile_combo, 0, 1, 1, 2)
         self.btn_profile_save = QtWidgets.QPushButton("Save")
@@ -698,37 +822,53 @@ class Main(QtWidgets.QWidget):
         pl.addWidget(self.btn_profile_rename, 1, 2)
         self.btn_profile_delete = QtWidgets.QPushButton("Delete")
         pl.addWidget(self.btn_profile_delete, 1, 3)
-        root.addWidget(profiles_box)
+        profiles_layout.addLayout(pl)
 
-        helper_box = QtWidgets.QGroupBox("Automation helpers")
-        hl = QtWidgets.QVBoxLayout(helper_box)
-        hl.setContentsMargins(10, 10, 10, 10)
-        helper_intro_text = (
-            "Automate profile restore at login, after resume and on power-source changes without keeping the GUI open."
+        left_col.addWidget(profiles_card)
+
+        helper_card = QtWidgets.QFrame()
+        helper_card.setObjectName("surfaceCard")
+        helper_layout = QtWidgets.QVBoxLayout(helper_card)
+        helper_layout.setContentsMargins(24, 24, 24, 24)
+        helper_layout.setSpacing(16)
+
+        helper_title = QtWidgets.QLabel("Smart automations")
+        helper_title.setObjectName("sectionTitle")
+        helper_layout.addWidget(helper_title)
+
+        helper_intro = QtWidgets.QLabel(
+            "Enable background services to restore your colors on login, resume or power-source changes."
         )
-        helper_label = QtWidgets.QLabel(helper_intro_text)
-        helper_label.setWordWrap(True)
-        hl.addWidget(helper_label)
+        helper_intro.setWordWrap(True)
+        helper_intro.setObjectName("sectionSubtitle")
+        helper_layout.addWidget(helper_intro)
+
+        helper_list = QtWidgets.QVBoxLayout()
+        helper_list.setSpacing(10)
+        helper_layout.addLayout(helper_list)
 
         def helper_entry(title, tooltip, *, selectable=False):
-            row = QtWidgets.QWidget()
+            row = QtWidgets.QFrame()
+            row.setObjectName("helperRow")
             row_layout = QtWidgets.QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(6)
+            row_layout.setContentsMargins(12, 10, 12, 10)
+            row_layout.setSpacing(12)
             info = QtWidgets.QToolButton()
             info.setText("?")
             info.setObjectName("helperInfoButton")
             info.setCursor(QtCore.Qt.PointingHandCursor)
             info.setAutoRaise(True)
-            info.setFixedSize(22, 22)
+            info.setFixedSize(24, 24)
             label = QtWidgets.QLabel(title)
-            flag = QtWidgets.QCheckBox("Disabled")
+            label.setObjectName("helperLabel")
+            flag = QtWidgets.QPushButton("Disabled")
+            flag.setCheckable(True)
+            flag.setCursor(QtCore.Qt.PointingHandCursor)
             flag.setObjectName("helperFlag")
             row_layout.addWidget(info)
             row_layout.addWidget(label)
-            row_layout.addSpacing(6)
-            row_layout.addWidget(flag)
             row_layout.addStretch(1)
+            row_layout.addWidget(flag)
 
             detail = QtWidgets.QLabel()
             detail.setWordWrap(True)
@@ -736,55 +876,79 @@ class Main(QtWidgets.QWidget):
             detail.setVisible(False)
             if selectable:
                 detail.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-            detail.setContentsMargins(28, 0, 0, 0)
+            detail.setContentsMargins(36, 0, 0, 0)
 
             widgets = (row, label, info, flag, detail)
             for widget in widgets:
                 widget.setToolTip(tooltip)
                 widget.setToolTipDuration(0)
 
-            hl.addWidget(row)
-            hl.addWidget(detail)
+            helper_list.addWidget(row)
+            helper_list.addWidget(detail)
             return flag, detail
 
         self.autostart_flag, self.autostart_status_label = helper_entry(
-            "Autostart (login)",
+            "Autostart on login",
             (
-                "Restores the saved keyboard profile when your desktop session starts.\n"
+                "Restore the saved keyboard profile when your desktop session begins.\n"
                 f"Desktop entry path: {AUTOSTART_ENTRY}"
             ),
         )
 
         self.resume_flag, self.resume_status_label = helper_entry(
             "Resume restore",
-            "Reapplies the current keyboard profile immediately after suspend, hibernate or hybrid sleep.",
+            "Reapply the profile immediately after suspend, hibernate or hybrid sleep.",
             selectable=True,
         )
 
         self.power_monitor_flag, self.power_monitor_status_label = helper_entry(
             "Power monitor",
-            "Listens for AC/battery changes and reapplies the profile when the power source switches.",
+            "Listen for AC/battery switches and reapply the profile when the source changes.",
             selectable=True,
         )
 
-        settings_row = QtWidgets.QWidget()
+        settings_row = QtWidgets.QFrame()
         settings_layout = QtWidgets.QHBoxLayout(settings_row)
-        settings_layout.setContentsMargins(0, 8, 0, 0)
+        settings_layout.setContentsMargins(0, 12, 0, 0)
+        settings_layout.setSpacing(12)
         settings_layout.addStretch(1)
-        self.start_in_tray_checkbox = QtWidgets.QCheckBox("Add in systray")
-        self.start_in_tray_checkbox.setChecked(self.settings.get("start_in_tray", False))
-        if not self.tray_supported:
-            self.start_in_tray_checkbox.setEnabled(False)
-            self.start_in_tray_checkbox.setToolTip(
-                "System tray not available in this session."
-            )
-        settings_layout.addWidget(self.start_in_tray_checkbox)
+        self.dark_mode_checkbox = QtWidgets.QCheckBox("Dark Mode")
+        self.dark_mode_checkbox.setChecked(self.settings.get("dark_mode", False))
+        settings_layout.addWidget(self.dark_mode_checkbox)
         self.notifications_checkbox = QtWidgets.QCheckBox("Show notifications")
         self.notifications_checkbox.setChecked(self.settings.get("show_notifications", True))
         settings_layout.addWidget(self.notifications_checkbox)
-        hl.addWidget(settings_row)
+        helper_layout.addWidget(settings_row)
 
-        root.addWidget(helper_box)
+        right_col.addWidget(helper_card)
+        right_col.addStretch(1)
+
+        self.console_box = QtWidgets.QFrame()
+        self.console_box.setObjectName("surfaceCard")
+        console_layout = QtWidgets.QVBoxLayout(self.console_box)
+        console_layout.setContentsMargins(24, 24, 24, 24)
+        console_layout.setSpacing(12)
+
+        console_header = QtWidgets.QHBoxLayout()
+        console_header.setSpacing(12)
+        console_title = QtWidgets.QLabel("Activity log")
+        console_title.setObjectName("sectionTitle")
+        console_header.addWidget(console_title)
+        console_header.addStretch(1)
+        console_layout.addLayout(console_header)
+
+        self.console = QtWidgets.QTextEdit()
+        self.console.setObjectName("logView")
+        self.console.setReadOnly(True)
+        self.console.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+        console_layout.addWidget(self.console, 1)
+
+        self.console_box.setVisible(False)
+
+        surface_layout.addWidget(self.console_box)
+        surface_layout.addStretch(1)
+
+        self.log_toggle_button.toggled.connect(self.on_log_toggle_toggled)
 
         self.apply_timer = QtCore.QTimer(self)
         self.apply_timer.setSingleShot(True)
@@ -825,11 +989,11 @@ class Main(QtWidgets.QWidget):
         self.btn_profile_rename.clicked.connect(self.on_profile_rename_clicked)
         self.btn_profile_delete.clicked.connect(self.on_profile_delete_clicked)
 
-        self.autostart_flag.stateChanged.connect(self.on_autostart_flag_changed)
-        self.resume_flag.stateChanged.connect(self.on_resume_flag_changed)
-        self.power_monitor_flag.stateChanged.connect(self.on_power_monitor_flag_changed)
-        self.start_in_tray_checkbox.toggled.connect(self.on_start_in_tray_toggled)
+        self.autostart_flag.toggled.connect(self.on_autostart_flag_changed)
+        self.resume_flag.toggled.connect(self.on_resume_flag_changed)
+        self.power_monitor_flag.toggled.connect(self.on_power_monitor_flag_changed)
         self.notifications_checkbox.toggled.connect(self.on_notifications_toggled)
+        self.dark_mode_checkbox.toggled.connect(self.on_dark_mode_toggled)
         self.refresh_autostart_flag()
         self.refresh_resume_controls()
         self.refresh_power_monitor_controls()
@@ -896,7 +1060,9 @@ class Main(QtWidgets.QWidget):
             return
         self.console_box.setVisible(checked)
         if hasattr(self, "log_toggle_button"):
-            self.log_toggle_button.setText("Hide log" if checked else "Show log")
+            self.log_toggle_button.setText(
+                "Hide activity log" if checked else "Show activity log"
+            )
 
     def show_window_from_tray(self):
         self.show()
@@ -947,31 +1113,20 @@ class Main(QtWidgets.QWidget):
             return
         return super().closeEvent(event)
 
-    def on_start_in_tray_toggled(self, checked):
-        checked = bool(checked)
-        if not self.tray_supported:
-            blocker = QtCore.QSignalBlocker(self.start_in_tray_checkbox)
-            self.start_in_tray_checkbox.setChecked(False)
-            del blocker
-            return
-        if self.settings.get("start_in_tray") == checked:
-            return
-        self.settings["start_in_tray"] = checked
-        self.save_settings()
-        if checked:
-            self.setup_tray_icon(enable_tray=True)
-            if self.tray_icon:
-                self.hide()
-                self.notify(APP_DISPLAY_NAME, "Minimized to tray.")
-        else:
-            self.show_window_from_tray()
-
     def on_notifications_toggled(self, checked):
         checked = bool(checked)
         if self.settings.get("show_notifications") == checked:
             return
         self.settings["show_notifications"] = checked
         self.save_settings()
+
+    def on_dark_mode_toggled(self, checked):
+        checked = bool(checked)
+        if self.settings.get("dark_mode") == checked:
+            return
+        self.settings["dark_mode"] = checked
+        self.save_settings()
+        self.apply_styles()
 
     def set_status(self, t, level="info"):
         self.log(t, level=level)
@@ -1025,24 +1180,417 @@ class Main(QtWidgets.QWidget):
 
     def apply_styles(self):
         base = """
-        QWidget { font-size: 13px; }
-        QGroupBox { font-weight: 600; }
-        QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
-        QComboBox, QSpinBox { padding: 4px 8px; }
-        QTextEdit { background-color: #0f172a; color: #f8fafc; border-radius: 8px; }
-        QPushButton {
-            padding: 7px 12px;
-            border-radius: 8px;
+        #MainView {
+            background-color: #f6f8fb;
+        }
+        #AppSurface {
+            background-color: transparent;
+        }
+        QLabel, QCheckBox, QToolButton {
+            color: #1f2933;
+            font-size: 13px;
+        }
+        #heroTitle {
+            font-size: 28px;
+            font-weight: 700;
+            color: #0f172a;
+        }
+        #heroSubtitle {
+            font-size: 14px;
+            color: #52606d;
+        }
+        #heroCard {
+            background-color: #ffffff;
+            border-radius: 20px;
+            border: 1px solid rgba(15, 33, 55, 0.08);
+            background-image: radial-gradient(circle at 15% 20%, rgba(79, 209, 197, 0.25), transparent 60%),
+                              radial-gradient(circle at 85% 10%, rgba(99, 102, 241, 0.2), transparent 45%);
+        }
+        #heroCaption {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #738095;
+        }
+        #hardwareBadge {
+            padding: 6px 12px;
+            border-radius: 999px;
+            background: rgba(59, 130, 246, 0.12);
+            color: #1d4ed8;
             font-weight: 600;
-            background-color: #2563eb;
-            color: #f8fafc;
+        }
+        #pillButton {
+            padding: 9px 18px;
+            border-radius: 999px;
+            font-weight: 600;
+            border: 1px solid rgba(148,163,184,0.45);
+            color: #0f172a;
+            background-color: #ffffff;
+        }
+        #pillButton:checked {
+            background-color: #3b82f6;
+            border: none;
+            color: #ffffff;
+        }
+        #surfaceCard {
+            background-color: #ffffff;
+            border-radius: 20px;
+            border: 1px solid rgba(15, 23, 42, 0.05);
+        }
+        #sectionTitle {
+            font-size: 17px;
+            font-weight: 600;
+            color: #111827;
+        }
+        #sectionSubtitle {
+            font-size: 13px;
+            color: #5f6b7a;
+        }
+        QComboBox, QSpinBox, QTextEdit {
+            padding: 8px 12px;
+            border-radius: 12px;
+            border: 1px solid rgba(148, 163, 184, 0.4);
+            background-color: #f9fafc;
+            color: #1f2933;
+        }
+        QComboBox::drop-down {
             border: none;
         }
-        QPushButton:hover { background-color: #1d4ed8; }
-        QPushButton:pressed { background-color: #1e40af; }
-        QPushButton:disabled { background-color: #94a3b8; color: #e2e8f0; }
+        QSlider::groove:horizontal {
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(148, 163, 184, 0.35);
+        }
+        QSlider::handle:horizontal {
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                        stop:0 #34d399, stop:1 #60a5fa);
+            border: 2px solid #22c55e;
+            border-radius: 10px;
+            width: 20px;
+            margin: -7px 0;
+        }
+        QSlider::sub-page:horizontal {
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #38bdf8, stop:1 #a855f7);
+            border-radius: 3px;
+        }
+        QPushButton {
+            padding: 11px 18px;
+            border-radius: 12px;
+            font-weight: 600;
+            border: 1px solid rgba(37, 99, 235, 0.15);
+            background: #ffffff;
+            color: #1f2933;
+        }
+        QPushButton:hover {
+            border-color: rgba(37, 99, 235, 0.4);
+        }
+        QPushButton:pressed {
+            background: #e2e8f0;
+        }
+        QPushButton:disabled {
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            background: #f1f5f9;
+            color: rgba(57, 77, 96, 0.6);
+        }
+        QPushButton:focus {
+            outline: 0;
+            border-color: rgba(99, 102, 241, 0.8);
+        }
+        #powerButton {
+            font-size: 16px;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
+            border: none;
+            color: #ffffff;
+        }
+        #powerButton[powerState="off"] {
+            background-color: #16a34a;
+        }
+        #powerButton[powerState="on"] {
+            background-color: #dc2626;
+        }
+        QTextEdit {
+            min-height: 160px;
+        }
+        #logView {
+            background-color: #0b1120;
+            color: #e2e8f0;
+            border: 1px solid rgba(15, 23, 42, 0.6);
+        }
+        #helperRow {
+            background-color: #f9fafc;
+            border-radius: 14px;
+            border: 1px solid rgba(148, 163, 184, 0.35);
+        }
+        #helperInfoButton {
+            border-radius: 999px;
+            background: rgba(148, 163, 184, 0.3);
+            color: #0f172a;
+            font-weight: 700;
+        }
+        #helperLabel {
+            font-weight: 600;
+            color: #1f2933;
+        }
+        #helperFlag {
+            font-weight: 600;
+        }
+        #helperDetail {
+            color: #4b5563;
+            font-size: 12px;
+        }
+        QCheckBox::indicator {
+            width: 20px;
+            height: 20px;
+        }
+        QCheckBox::indicator:unchecked {
+            border-radius: 6px;
+            border: 1px solid rgba(148, 163, 184, 0.7);
+            background-color: #ffffff;
+        }
+        QCheckBox::indicator:checked {
+            border-radius: 6px;
+            border: none;
+            background-color: #3b82f6;
+        }
+        QPushButton#helperFlag {
+            padding: 8px 22px;
+            border-radius: 16px;
+            border: 2px solid #94a3b8;
+            background-color: #ffffff;
+            font-weight: 600;
+            color: #1f2933;
+        }
+        QPushButton#helperFlag:checked {
+            border: 2px solid #16a34a;
+            color: #ffffff;
+            background-color: #16a34a;
+        }
+        QPushButton#helperFlag:disabled {
+            background-color: #f1f5f9;
+            color: #94a3b8;
+            border: 2px solid #cbd5e1;
+        }
         """
-        self.setStyleSheet(base)
+        dark = """
+        #MainView {
+            background-color: #0f172a;
+        }
+        #AppSurface {
+            background-color: transparent;
+        }
+        QLabel, QCheckBox, QToolButton {
+            color: #e2e8f0;
+            font-size: 13px;
+        }
+        #heroTitle {
+            font-size: 28px;
+            font-weight: 700;
+            color: #f1f5f9;
+        }
+        #heroSubtitle {
+            font-size: 14px;
+            color: #94a3b8;
+        }
+        #heroCard {
+            background-color: #1e293b;
+            border-radius: 20px;
+            border: 1px solid rgba(148, 163, 184, 0.15);
+            background-image: radial-gradient(circle at 15% 20%, rgba(79, 209, 197, 0.15), transparent 60%),
+                              radial-gradient(circle at 85% 10%, rgba(99, 102, 241, 0.12), transparent 45%);
+        }
+        #heroCaption {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #64748b;
+        }
+        #hardwareBadge {
+            padding: 6px 12px;
+            border-radius: 999px;
+            background: rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+            font-weight: 600;
+        }
+        #pillButton {
+            padding: 9px 18px;
+            border-radius: 999px;
+            font-weight: 600;
+            border: 1px solid rgba(148,163,184,0.3);
+            color: #e2e8f0;
+            background-color: #1e293b;
+        }
+        #pillButton:checked {
+            background-color: #3b82f6;
+            border: none;
+            color: #ffffff;
+        }
+        #surfaceCard {
+            background-color: #1e293b;
+            border-radius: 20px;
+            border: 1px solid rgba(148, 163, 184, 0.1);
+        }
+        #sectionTitle {
+            font-size: 17px;
+            font-weight: 700;
+            color: #f1f5f9;
+        }
+        #sectionSubtitle {
+            font-size: 13px;
+            color: #94a3b8;
+        }
+        QComboBox {
+            padding: 10px 14px;
+            border-radius: 10px;
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            background-color: #0f172a;
+            color: #e2e8f0;
+            font-size: 13px;
+        }
+        QComboBox:hover {
+            border-color: rgba(99, 102, 241, 0.5);
+        }
+        QComboBox::drop-down {
+            border: none;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #1e293b;
+            color: #e2e8f0;
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            selection-background-color: #3b82f6;
+            selection-color: #ffffff;
+        }
+        QSlider::groove:horizontal {
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(148, 163, 184, 0.25);
+        }
+        QSlider::handle:horizontal {
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                        stop:0 #34d399, stop:1 #60a5fa);
+            border: 2px solid #22c55e;
+            border-radius: 10px;
+            width: 20px;
+            margin: -7px 0;
+        }
+        QSlider::sub-page:horizontal {
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #38bdf8, stop:1 #a855f7);
+            border-radius: 3px;
+        }
+        QSpinBox {
+            padding: 10px 14px;
+            border-radius: 10px;
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            background-color: #0f172a;
+            color: #e2e8f0;
+            font-size: 13px;
+        }
+        QPushButton {
+            padding: 11px 18px;
+            border-radius: 12px;
+            font-weight: 600;
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            background: #1e293b;
+            color: #e2e8f0;
+        }
+        QPushButton:hover {
+            border-color: rgba(99, 102, 241, 0.5);
+        }
+        QPushButton:pressed {
+            background: #334155;
+            color: #e2e8f0;
+        }
+        QPushButton:disabled {
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            background: #1e293b;
+            color: rgba(148, 163, 184, 0.5);
+        }
+        QPushButton:focus {
+            outline: 0;
+            border-color: rgba(99, 102, 241, 0.8);
+        }
+        #powerButton {
+            font-size: 16px;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
+            border: none;
+            color: #ffffff;
+        }
+        #powerButton[powerState="off"] {
+            background-color: #16a34a;
+        }
+        #powerButton[powerState="on"] {
+            background-color: #dc2626;
+        }
+        QTextEdit {
+            min-height: 160px;
+        }
+        #logView {
+            background-color: #020617;
+            color: #e2e8f0;
+            border: 1px solid rgba(148, 163, 184, 0.2);
+        }
+        #helperRow {
+            background-color: #0f172a;
+            border-radius: 14px;
+            border: 1px solid rgba(148, 163, 184, 0.2);
+        }
+        #helperInfoButton {
+            border-radius: 999px;
+            background: rgba(148, 163, 184, 0.2);
+            color: #e2e8f0;
+            font-weight: 700;
+        }
+        #helperLabel {
+            font-weight: 600;
+            color: #e2e8f0;
+        }
+        #helperFlag {
+            font-weight: 600;
+        }
+        #helperDetail {
+            color: #94a3b8;
+            font-size: 12px;
+        }
+        QCheckBox::indicator {
+            width: 20px;
+            height: 20px;
+        }
+        QCheckBox::indicator:unchecked {
+            border-radius: 6px;
+            border: 1px solid rgba(148, 163, 184, 0.5);
+            background-color: #1e293b;
+        }
+        QCheckBox::indicator:checked {
+            border-radius: 6px;
+            border: none;
+            background-color: #3b82f6;
+        }
+        QPushButton#helperFlag {
+            padding: 8px 22px;
+            border-radius: 16px;
+            border: 2px solid #64748b;
+            background-color: #1e293b;
+            font-weight: 600;
+            color: #e2e8f0;
+        }
+        QPushButton#helperFlag:checked {
+            border: 2px solid #16a34a;
+            color: #ffffff;
+            background-color: #16a34a;
+        }
+        QPushButton#helperFlag:disabled {
+            background-color: #1e293b;
+            color: #64748b;
+            border: 2px solid #334155;
+        }
+        """
+        if self.settings.get("dark_mode", False):
+            self.setStyleSheet(dark)
+        else:
+            self.setStyleSheet(base)
 
     def load_profile_into_controls(self, data):
         if not data:
@@ -1289,10 +1837,14 @@ class Main(QtWidgets.QWidget):
         try:
             if self.autostart_enabled:
                 remove_autostart_entry()
+                self.settings["start_in_tray"] = False
+                self.save_settings()
                 self.set_status("Autostart entry removed.")
             else:
                 ensure_restore_script_executable()
                 create_autostart_entry()
+                self.settings["start_in_tray"] = True
+                self.save_settings()
                 self.set_status(f"Autostart entry created at {AUTOSTART_ENTRY}.")
         except OSError as exc:
             error = f"Autostart error: {exc}"
@@ -1310,7 +1862,6 @@ class Main(QtWidgets.QWidget):
         status_enabled, status_text = is_resume_service_enabled()
         self.resume_enabled = status_enabled
         self.resume_status = status_text
-        label_text = status_text if status_text else ("Enabled" if status_enabled else "Disabled")
         if hasattr(self, "resume_status_label"):
             detail_text = (
                 status_text
@@ -1366,7 +1917,6 @@ class Main(QtWidgets.QWidget):
         status_enabled, status_text = is_power_monitor_enabled()
         self.power_monitor_enabled = status_enabled
         self.power_monitor_status = status_text
-        label_text = status_text if status_text else ("Enabled" if status_enabled else "Disabled")
         if hasattr(self, "power_monitor_status_label"):
             detail_text = (
                 status_text
@@ -1461,21 +2011,29 @@ class Main(QtWidgets.QWidget):
     def on_profile_file_changed(self, path):
         if path != PROFILE_PATH:
             return
-        self.watch_profile_paths()
         if self._ignore_profile_events:
+            self.watch_profile_paths()
             return
-        self.reload_profile_store_from_disk(announce=True)
-        self.set_status("Profiles reloaded from disk.")
+        self.watch_profile_paths()
+        try:
+            self.reload_profile_store_from_disk(announce=True)
+            self.set_status("Profiles reloaded from disk.")
+        except (OSError, json.JSONDecodeError) as exc:
+            self.set_status(f"Failed to reload profiles: {exc}", level="error")
 
     def on_profile_directory_changed(self, path):
         if path != CONFIG_DIR:
             return
-        self.watch_profile_paths()
         if self._ignore_profile_events:
+            self.watch_profile_paths()
             return
+        self.watch_profile_paths()
         if os.path.isfile(PROFILE_PATH):
-            self.reload_profile_store_from_disk(announce=True)
-            self.set_status("Profiles updated after directory change.")
+            try:
+                self.reload_profile_store_from_disk(announce=True)
+                self.set_status("Profiles updated after directory change.")
+            except (OSError, json.JSONDecodeError) as exc:
+                self.set_status(f"Failed to reload profiles: {exc}", level="error")
 
     def update_panels(self):
         is_static = (self.mode.currentText() == "static")
@@ -1628,7 +2186,23 @@ class Main(QtWidgets.QWidget):
             self.apply_effect()
 
 
-app = QtWidgets.QApplication([])
-w = Main()
-w.show()
-app.exec()
+def main():
+    app = QtWidgets.QApplication([])
+
+    lock_handle = acquire_single_instance_lock()
+    if lock_handle is None:
+        QtWidgets.QMessageBox.warning(
+            None,
+            APP_DISPLAY_NAME,
+            "Application is already running.\n\nCheck the system tray for the running instance.",
+        )
+        sys.exit(0)
+
+    w = Main()
+    if not (w.settings.get("start_in_tray", False) and w.tray_supported and w.tray_icon):
+        w.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

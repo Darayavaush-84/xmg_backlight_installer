@@ -21,7 +21,7 @@ Installer and deployment helper for the **backlight-linux** GUI that controls th
 
 1. Clone the repository and enter the project directory:
    ```bash
-   git clone https://github.com/<your-account>/xmg_backlight_installer.git
+   git clone https://github.com/Darayavaush-84/xmg_backlight_installer.git
    cd xmg_backlight_installer
    ```
 2. Run the installer as root:
@@ -29,6 +29,25 @@ Installer and deployment helper for the **backlight-linux** GUI that controls th
    sudo python3 install.py
    ```
 3. Launch **XMG Backlight Management** from your desktop menu and enable the automation toggles (resume + power monitor) if desired.
+
+## Uninstallation
+
+To completely remove the installed files and configurations:
+
+```bash
+sudo python3 install.py --uninstall
+```
+
+This removes:
+- GUI scripts from `/usr/share/xmg-backlight`
+- Launcher wrapper at `/usr/local/bin/xmg-backlight`
+- Desktop entry and autostart files
+- System-sleep hook and systemd drop-ins
+
+**Note:** pip packages (`ite8291r3-ctl`, `PySide6`) are **not** removed automatically. To remove them:
+```bash
+pip uninstall ite8291r3-ctl PySide6
+```
 
 The installer performs these actions:
 * Ensures `ite8291r3-ctl` and `PySide6` are installed via `pip`.
