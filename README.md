@@ -4,6 +4,10 @@ XMG Backlight Installer helps you deploy the **backlight-linux** GUI for ITE 829
 
 Special thanks to **Barnabás Pőcze** and contributors for the `ite8291r3-ctl` driver. Without their excellent work, this GUI would not be possible.
 
+## Screenshot
+
+![XMG Backlight Management](gui.png)
+
 ## Repository layout
 
 | Path | Purpose |
