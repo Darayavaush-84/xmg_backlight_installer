@@ -11,18 +11,23 @@ from __future__ import annotations
 
 import argparse
 import filecmp
+import importlib.util
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
-import textwrap
+import time
 from pathlib import Path
 from typing import Iterable, Tuple
 
 APP_NAME = "XMG Backlight Management"
 DRIVER_PACKAGE = "ite8291r3-ctl"
 GUI_DEPENDENCY = "PySide6"
+GUI_SCRIPT_NAME = "keyboard_backlight.py"
+GUI_CLOSE_TIMEOUT_SEC = 4.0
+PYTHON_EXECUTABLE = sys.executable or "/usr/bin/python3"
 SHARE_DIR = Path("/usr/share/xmg-backlight")
 WRAPPER_PATH = Path("/usr/local/bin/xmg-backlight")
 DESKTOP_PATH = Path("/usr/share/applications/XMG-Backlight-Management.desktop")
@@ -40,8 +45,9 @@ FEDORA_NOTICE = (
     "This installer has been tested on Fedora. Other distributions have not "
     "been validated and may require manual adjustments."
 )
-LOG_MAX_SIZE_BYTES = 512 * 1024  # 512 KB
-LOG_FILE_PATH = Path("/tmp/xmg-backlight-resume.log")
+LOG_DIR = Path("/var/log/xmg-backlight")
+LOG_FILE_PATH = LOG_DIR / "restore.log"
+INSTALLER_LOG_PATH = LOG_DIR / "installer.log"
 
 BASE_DIR = Path(__file__).resolve().parent
 SOURCE_DIR = (BASE_DIR / "source").resolve()
@@ -52,6 +58,7 @@ FILES_TO_DEPLOY = [
 ]
 DIRS_TO_DEPLOY: list[str] = []
 DRIVER_INSTALLED_THIS_RUN = False
+_INSTALLER_LOG_READY = False
 
 
 class InstallerError(RuntimeError):
@@ -59,7 +66,37 @@ class InstallerError(RuntimeError):
 
 
 def log(msg: str) -> None:
-    print(f"[installer] {msg}")
+    line = f"[installer] {msg}"
+    print(line)
+    append_installer_log(line)
+
+
+def ensure_installer_log_path() -> bool:
+    global _INSTALLER_LOG_READY
+    if _INSTALLER_LOG_READY:
+        return True
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(LOG_DIR, 0o755)
+        if not INSTALLER_LOG_PATH.exists():
+            INSTALLER_LOG_PATH.touch()
+        os.chmod(INSTALLER_LOG_PATH, 0o644)
+    except OSError:
+        return False
+    _INSTALLER_LOG_READY = True
+    return True
+
+
+def append_installer_log(line: str) -> None:
+    if not ensure_installer_log_path():
+        return
+    try:
+        with open(INSTALLER_LOG_PATH, "a", encoding="utf-8") as handle:
+            handle.write(line)
+            if not line.endswith("\n"):
+                handle.write("\n")
+    except OSError:
+        pass
 
 
 def require_root() -> None:
@@ -85,6 +122,85 @@ def run(cmd: Iterable[str], check: bool = True) -> Tuple[int, str, str]:
     return proc.returncode, stdout, stderr
 
 
+def iter_process_args() -> Iterable[Tuple[int, list[str]]]:
+    proc_dir = Path("/proc")
+    for entry in proc_dir.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            data = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if not data:
+            continue
+        parts = [part.decode("utf-8", "ignore") for part in data.split(b"\0") if part]
+        if not parts:
+            continue
+        yield int(entry.name), parts
+
+
+def find_gui_pids() -> list[int]:
+    pids: list[int] = []
+    for pid, args in iter_process_args():
+        if any(Path(arg).name == GUI_SCRIPT_NAME for arg in args):
+            pids.append(pid)
+    return pids
+
+
+def is_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def stop_running_gui_processes() -> None:
+    log("Checking for running GUI instance(s)...")
+    pids = find_gui_pids()
+    if not pids:
+        log("No running GUI instances detected.")
+        return
+    pid_list = ", ".join(str(pid) for pid in pids)
+    log(
+        "Detected running GUI instance(s) "
+        f"({pid_list}). Closing them to continue."
+    )
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except PermissionError as exc:
+            log(f"Failed to stop GUI process {pid}: {exc}")
+    deadline = time.monotonic() + GUI_CLOSE_TIMEOUT_SEC
+    remaining = []
+    while time.monotonic() < deadline:
+        remaining = [pid for pid in pids if is_pid_alive(pid)]
+        if not remaining:
+            break
+        time.sleep(0.2)
+    if remaining:
+        pid_list = ", ".join(str(pid) for pid in remaining)
+        log(f"GUI still running ({pid_list}); sending SIGKILL.")
+        for pid in remaining:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                continue
+            except PermissionError as exc:
+                log(f"Failed to kill GUI process {pid}: {exc}")
+        time.sleep(0.2)
+        remaining = [pid for pid in remaining if is_pid_alive(pid)]
+    if remaining:
+        pid_list = ", ".join(str(pid) for pid in remaining)
+        log(f"GUI still running ({pid_list}); continuing anyway.")
+    else:
+        log("GUI processes stopped.")
+
+
 def pip_show(package: str) -> bool:
     rc, _, _ = run([sys.executable, "-m", "pip", "show", package], check=False)
     return rc == 0
@@ -108,8 +224,8 @@ def describe_component(component: str, state: str, action: str) -> None:
 
 
 def install_pip_package(package: str) -> bool:
-    log(f"Installing/upgrading pip package: {package}")
-    rc, _, _ = run([sys.executable, "-m", "pip", "install", "--upgrade", package], check=False)
+    log(f"Installing pip package: {package}")
+    rc, _, _ = run([sys.executable, "-m", "pip", "install", package], check=False)
     if rc != 0:
         raise InstallerError(f"Failed to install pip package {package} (exit code {rc}).")
     return True
@@ -122,20 +238,21 @@ def detect_driver() -> None:
         describe_component(
             "Driver (ite8291r3-ctl)",
             f"installed via pip (version {version})",
-            "pip install --upgrade to refresh if needed",
+            "skipping install",
         )
-    elif driver_in_path:
+        return
+    if driver_in_path:
         describe_component(
             "Driver (ite8291r3-ctl)",
             "binary found in PATH but package version unknown",
-            "pip install --upgrade to sync with latest release",
+            "skipping install",
         )
-    else:
-        describe_component(
-            "Driver (ite8291r3-ctl)",
-            "not detected",
-            "pip install will install it now",
-        )
+        return
+    describe_component(
+        "Driver (ite8291r3-ctl)",
+        "not detected",
+        "pip install will install it now",
+    )
     if install_pip_package(DRIVER_PACKAGE):
         global DRIVER_INSTALLED_THIS_RUN
         DRIVER_INSTALLED_THIS_RUN = True
@@ -216,14 +333,21 @@ def ensure_runtime_dependency() -> None:
         describe_component(
             f"GUI dependency ({GUI_DEPENDENCY})",
             f"installed via pip (version {version})",
-            "pip install --upgrade to refresh if needed",
+            "skipping install",
         )
-    else:
+        return
+    if importlib.util.find_spec(GUI_DEPENDENCY) is not None:
         describe_component(
             f"GUI dependency ({GUI_DEPENDENCY})",
-            "not detected",
-            "pip install will install it now",
+            "available in the current Python environment",
+            "skipping install",
         )
+        return
+    describe_component(
+        f"GUI dependency ({GUI_DEPENDENCY})",
+        "not detected",
+        "pip install will install it now",
+    )
     install_pip_package(GUI_DEPENDENCY)
 
 
@@ -275,7 +399,7 @@ def create_wrapper() -> None:
     script = (
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
-        f"exec python3 {SHARE_DIR}/keyboard_backlight.py \"$@\"\n"
+        f"exec {PYTHON_EXECUTABLE} {SHARE_DIR}/keyboard_backlight.py \"$@\"\n"
     )
     WRAPPER_PATH.write_text(script, encoding="utf-8")
     mark_executable(WRAPPER_PATH)
@@ -300,7 +424,7 @@ def create_desktop_entry() -> None:
 def create_restore_autostart_entry() -> None:
     log(f"Creating optional restore launcher at {AUTOSTART_PATH}")
     AUTOSTART_PATH.parent.mkdir(parents=True, exist_ok=True)
-    exec_cmd = f"python3 {SHARE_DIR}/restore_profile.py"
+    exec_cmd = f"{PYTHON_EXECUTABLE} {SHARE_DIR}/restore_profile.py"
     entry = (
         "[Desktop Entry]\n"
         "Type=Application\n"
@@ -312,104 +436,18 @@ def create_restore_autostart_entry() -> None:
     AUTOSTART_PATH.write_text(entry, encoding="utf-8")
 
 
-def create_system_sleep_hook() -> None:
-    log(f"Creating system-sleep hook at {SYSTEM_SLEEP_HOOK_PATH}")
-    SYSTEM_SLEEP_HOOK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    script = textwrap.dedent(
-        f"""\
-        #!/usr/bin/env sh
-        set -eu
-        LOGFILE="/tmp/xmg-backlight-resume.log"
-        LOG_MAX_SIZE={LOG_MAX_SIZE_BYTES}
-        phase="${{1:-}}"
-        operation="${{2:-unknown}}"
-        timestamp="$(date)"
-
-        # Log rotation: truncate if exceeds max size
-        if [ -f "$LOGFILE" ]; then
-          log_size=$(stat -c%s "$LOGFILE" 2>/dev/null || echo 0)
-          if [ "$log_size" -gt "$LOG_MAX_SIZE" ]; then
-            tail -c "$((LOG_MAX_SIZE / 2))" "$LOGFILE" > "$LOGFILE.tmp" 2>/dev/null && mv "$LOGFILE.tmp" "$LOGFILE" || true
-            printf "%s: log rotated (was %s bytes)\\n" "$(date)" "$log_size" >> "$LOGFILE"
-          fi
-        fi
-
-        printf "%s: hook called with phase=%s op=%s\\n" "$timestamp" "$phase" "$operation" >> "$LOGFILE"
-        if [ "$phase" != "post" ]; then
-          exit 0
-        fi
-        sleep 8
-        printf "%s: starting restore for users\\n" "$(date)" >> "$LOGFILE"
-        if command -v loginctl >/dev/null 2>&1; then
-          users=$(loginctl list-sessions --no-legend 2>/dev/null | awk '{{print $3}}' | sort -u)
-        else
-          users=""
-        fi
-        printf "%s: found users: %s\\n" "$(date)" "$users" >> "$LOGFILE"
-        for u in $users; do
-          [ "$u" = "root" ] && continue
-          printf "%s: restoring for user %s\\n" "$(date)" "$u" >> "$LOGFILE"
-          if command -v runuser >/dev/null 2>&1; then
-            runuser -u "$u" -- /usr/bin/python3 {SHARE_DIR}/restore_profile.py >> "$LOGFILE" 2>&1 || printf "%s: restore failed for %s\\n" "$(date)" "$u" >> "$LOGFILE"
-          else
-            su - "$u" -c "/usr/bin/python3 {SHARE_DIR}/restore_profile.py" >> "$LOGFILE" 2>&1 || printf "%s: restore failed for %s\\n" "$(date)" "$u" >> "$LOGFILE"
-          fi
-        done
-        printf "%s: hook finished\\n" "$(date)" >> "$LOGFILE"
-        """
-    )
-    SYSTEM_SLEEP_HOOK_PATH.write_text(script, encoding="utf-8")
-    mark_executable(SYSTEM_SLEEP_HOOK_PATH)
-
-
-def create_systemd_resume_dropins() -> None:
-    log(f"Creating resume helper script at {RESUME_HELPER_PATH}")
-    RESUME_HELPER_PATH.parent.mkdir(parents=True, exist_ok=True)
-    helper_script = textwrap.dedent(
-        """\
-        #!/usr/bin/env bash
-        set -euo pipefail
-        operation="${1:-suspend}"
-        HOOK="/etc/systemd/system-sleep/xmg-backlight-restore"
-        LOG_TAG="xmg-backlight-hook"
-        if [ ! -x "$HOOK" ]; then
-          if command -v logger >/dev/null 2>&1; then
-            logger -t "$LOG_TAG" "restore hook missing at $HOOK"
-          fi
-          exit 0
-        fi
-        "$HOOK" post "$operation" || {
-          if command -v logger >/dev/null 2>&1; then
-            logger -t "$LOG_TAG" "restore hook failed for $operation"
-          fi
-          exit 0
-        }
-        """
-    )
-    RESUME_HELPER_PATH.write_text(helper_script, encoding="utf-8")
-    mark_executable(RESUME_HELPER_PATH)
-
-    for service, operation in SYSTEMD_SERVICE_DROPINS:
-        dropin_dir = Path("/etc/systemd/system") / f"{service}.d"
-        dropin_dir.mkdir(parents=True, exist_ok=True)
-        dropin_path = dropin_dir / DROPIN_FILENAME
-        dropin_content = (
-            "[Service]\n"
-            f"ExecStartPost={RESUME_HELPER_PATH} {operation}\n"
-        )
-        dropin_path.write_text(dropin_content, encoding="utf-8")
-        log(f"Configured resume drop-in for {service} (operation={operation})")
-
-
 def reload_systemd_daemon() -> None:
     log("Reloading systemd manager configuration")
     run(["systemctl", "daemon-reload"], check=False)
 
 
-def remove_user_data() -> None:
-    """Remove user configuration, profiles, systemd services, and autostart entries for all users."""
+def remove_user_data(remove_profiles: bool) -> None:
+    """Remove user systemd services/autostart entries, optionally profiles, for all users.
+
+    Args:
+        remove_profiles: If True, also remove user profiles and settings.
+    """
     import pwd
-    import glob
     removed_any = False
     
     for entry in pwd.getpwall():
@@ -418,12 +456,13 @@ def remove_user_data() -> None:
         
         home = Path(entry.pw_dir)
         
-        # Remove config directory (~/.config/backlight-linux/)
-        config_dir = home / ".config" / "backlight-linux"
-        if config_dir.exists():
-            shutil.rmtree(config_dir)
-            log(f"Removed user config: {config_dir}")
-            removed_any = True
+        if remove_profiles:
+            # Remove config directory (~/.config/backlight-linux/)
+            config_dir = home / ".config" / "backlight-linux"
+            if config_dir.exists():
+                shutil.rmtree(config_dir)
+                log(f"Removed user config: {config_dir}")
+                removed_any = True
         
         # Remove systemd user services (~/.config/systemd/user/keyboard-backlight-*.service)
         systemd_user_dir = home / ".config" / "systemd" / "user"
@@ -460,7 +499,10 @@ def remove_user_data() -> None:
                 removed_any = True
     
     if not removed_any:
-        log("No user data found to remove.")
+        if remove_profiles:
+            log("No user data found to remove.")
+        else:
+            log("No user services or autostart entries found to remove.")
 
 
 def uninstall(purge: bool = False, purge_user_data: bool = False) -> None:
@@ -490,6 +532,7 @@ def uninstall(purge: bool = False, purge_user_data: bool = False) -> None:
         AUTOSTART_PATH,
         DESKTOP_PATH,
         WRAPPER_PATH,
+        LOG_FILE_PATH,
     ]
     for path in paths_to_remove:
         if path.exists():
@@ -500,6 +543,9 @@ def uninstall(purge: bool = False, purge_user_data: bool = False) -> None:
     if SHARE_DIR.exists():
         shutil.rmtree(SHARE_DIR)
         log(f"Removed {SHARE_DIR}")
+    if LOG_DIR.exists() and LOG_DIR.is_dir() and not any(LOG_DIR.iterdir()):
+        LOG_DIR.rmdir()
+        log(f"Removed empty directory {LOG_DIR}")
     
     # Reload systemd
     reload_systemd_daemon()
@@ -517,10 +563,12 @@ def uninstall(purge: bool = False, purge_user_data: bool = False) -> None:
             else:
                 log(f"Could not remove {pkg} (may not be installed or requires different pip)")
     
-    # Optionally remove user data
-    if purge_user_data:
-        log("Removing user profiles and settings...")
-        remove_user_data()
+    log(
+        "Removing user profiles, services, and autostart entries..."
+        if purge_user_data
+        else "Removing user services and autostart entries..."
+    )
+    remove_user_data(remove_profiles=purge_user_data)
     
     log("Uninstallation completed.")
     if not purge:
@@ -552,6 +600,7 @@ def main() -> None:
 
     log(FEDORA_NOTICE)
     require_root()
+    stop_running_gui_processes()
 
     if args.uninstall:
         purge = args.purge
@@ -582,8 +631,6 @@ def main() -> None:
     create_wrapper()
     create_desktop_entry()
     create_restore_autostart_entry()
-    create_system_sleep_hook()
-    create_systemd_resume_dropins()
     reload_systemd_daemon()
     log("Installation completed successfully.")
     log(

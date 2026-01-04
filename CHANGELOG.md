@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.4.0 – 2026-01-04
+### Installer
+- Resume restore now uses the GUI-managed user service only (system-level hooks are no longer installed).
+- Partial uninstall now removes per-user services and autostart entries to avoid stale launchers.
+- The installer now closes any running GUI instance before install/uninstall.
+- The installer now saves logs to `/var/log/xmg-backlight/installer.log`.
+- Launcher/autostart now use the same Python interpreter used to run the installer.
+- Pip dependencies are installed only if missing (no forced upgrades).
+
+### GUI
+- Log exports now include the installer log when available.
+- Sync device state when opening/activating the GUI or interacting with the system tray (click/menu), logging the result in the activity log.
+
 ## v1.3 – 2026-01-03
 ### Installer
 - Added `--purge` flag for `--uninstall` to also remove pip packages (ite8291r3-ctl, PySide6, shiboken6).

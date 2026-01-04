@@ -1,6 +1,6 @@
 # XMG Backlight Installer
 
-Installer and deployment helper for the **backlight-linux** GUI that controls the ITE 8291 RGB keyboard on XMG/Tongfang laptops. It ships the GUI, systemd user services, and system-level resume hooks so that the keyboard backlight is restored automatically after suspend/hibernate.
+Installer and deployment helper for the **backlight-linux** GUI that controls the ITE 8291 RGB keyboard on XMG/Tongfang laptops. It ships the GUI and systemd user services so that the keyboard backlight can be restored automatically after suspend/hibernate.
 
 ## Repository layout
 
@@ -39,7 +39,7 @@ sudo python3 install.py --uninstall
 ```
 
 When run without additional flags, the installer will prompt you to choose:
-1. **Partial removal** – removes only system files (GUI scripts, launcher, desktop entry, systemd hooks)
+1. **Partial removal** – removes system files plus user services/autostart entries (keeps user profiles)
 2. **Full removal** – removes everything including pip packages and user profiles
 
 ### Command-line flags
@@ -64,9 +64,8 @@ The installer performs these actions:
 * Ensures `ite8291r3-ctl` and `PySide6` are installed via `pip`.
 * Copies the GUI scripts (`keyboard_backlight.py`, `restore_profile.py`, `power_state_monitor.py`) into `/usr/share/xmg-backlight`.
 * Creates a launcher wrapper at `/usr/local/bin/xmg-backlight` and a desktop entry under `/usr/share/applications`.
-* Installs `/etc/systemd/system-sleep/xmg-backlight-restore` and a helper `/usr/local/lib/xmg-backlight-resume-hook.sh`.
-* Adds drop-ins for `systemd-suspend*` services so the resume hook runs automatically, then reloads `systemd`.
 * Probes for compatible ITE 8291 keyboards; if none are found you can abort safely and the just-installed driver will be removed automatically.
+* Resume restore and power monitoring are controlled from the GUI using systemd user services.
 
 ## System tray & notifications
 
@@ -103,17 +102,13 @@ The **Quick profiles** card provides full profile management:
 
 Enable **Dark Mode** in the Smart automations section for a dark UI theme. The dark theme applies to the main window and all dialogs.
 
-## Testing the resume hook
+## Testing resume restore
 
 1. Trigger a suspend/resume cycle from your desktop environment.
 2. After resume, confirm the keyboard lights restored automatically.
-3. Inspect the log for troubleshooting:
+3. Inspect the user service log for troubleshooting:
    ```bash
-   sudo tail -n 40 /tmp/xmg-backlight-resume.log
-   ```
-4. For additional diagnostics check:
-   ```bash
-   journalctl -b | grep xmg-backlight-hook
+   journalctl --user -u keyboard-backlight-resume.service -b
    ```
 
 If the keyboard stays dark but manual restore works (`python3 /usr/share/xmg-backlight/restore_profile.py`), inspect the log file above to understand which phase failed.
@@ -123,7 +118,7 @@ If the keyboard stays dark but manual restore works (`python3 /usr/share/xmg-bac
 * Use the files under `source/` as the canonical payload: modify them there, then re-run the installer to copy updates into `/usr/share/xmg-backlight`.
 * Keep the installer idempotent; re-running it should refresh dependencies and hooks without breaking existing installs.
 * When adding system-level integrations (systemd units, hooks), place the generator logic in `installer/install.py` so that deployments remain reproducible.
-* Run `python3 -m pytest` (if you add tests) or manual smoke tests: start the GUI, toggle automation, run suspend/resume, and inspect `/tmp/xmg-backlight-resume.log`.
+* Run `python3 -m pytest` (if you add tests) or manual smoke tests: start the GUI, toggle automation, run suspend/resume, and inspect `/var/log/xmg-backlight/restore.log`.
 
 ## Credits
 

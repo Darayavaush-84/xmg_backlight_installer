@@ -13,7 +13,7 @@ import time
 from PySide6 import QtCore, QtWidgets, QtGui
 
 APP_DISPLAY_NAME = "XMG Backlight Management"
-APP_VERSION = "1.3"
+APP_VERSION = "1.3.1"
 GITHUB_REPO_URL = "https://github.com/Darayavaush-84/xmg_backlight_installer"
 NOTIFICATION_TIMEOUT_MS = 1500
 TOOL_ENV_VAR = "ITE8291R3_CTL"
@@ -66,6 +66,8 @@ SETTINGS_PATH = os.path.join(CONFIG_DIR, "settings.json")
 LOCK_FILE_PATH = os.path.join(CONFIG_DIR, "app.lock")
 RESTORE_SCRIPT = os.path.join(BASE_DIR, "restore_profile.py")
 POWER_MONITOR_SCRIPT = os.path.join(BASE_DIR, "power_state_monitor.py")
+RESUME_LOG_PATH = "/var/log/xmg-backlight/restore.log"
+INSTALLER_LOG_PATH = "/var/log/xmg-backlight/installer.log"
 AUTOSTART_DIR = os.path.join(os.path.expanduser("~"), ".config", "autostart")
 AUTOSTART_ENTRY = os.path.join(AUTOSTART_DIR, "keyboard-backlight-restore.desktop")
 SYSTEMD_USER_DIR = os.path.join(os.path.expanduser("~"), ".config", "systemd", "user")
@@ -1050,6 +1052,7 @@ class Main(QtWidgets.QWidget):
         self.tray_icon = None
         self._tray_close_hint_shown = False
         self._quitting = False
+        self._last_sync_ts = 0.0
         self.setup_tray_icon(enable_tray=enable_tray)
 
     def log(self, text, level="info"):
@@ -1080,6 +1083,7 @@ class Main(QtWidgets.QWidget):
         if self.tray_icon is None:
             self.tray_icon = QtWidgets.QSystemTrayIcon(self.windowIcon(), self)
             menu = QtWidgets.QMenu(self)
+            menu.aboutToShow.connect(self.on_tray_menu_about_to_show)
             show_action = menu.addAction("Show window")
             show_action.triggered.connect(self.show_window_from_tray)
             menu.addSeparator()
@@ -1132,11 +1136,20 @@ class Main(QtWidgets.QWidget):
         try:
             with zipfile.ZipFile(file_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                 # 1. Resume hook log
-                resume_log = "/tmp/xmg-backlight-resume.log"
-                if os.path.exists(resume_log):
-                    zf.write(resume_log, "resume-hook.log")
+                if os.path.exists(RESUME_LOG_PATH):
+                    try:
+                        zf.write(RESUME_LOG_PATH, "resume-hook.log")
+                    except Exception:
+                        pass
+
+                # 2. Installer log
+                if os.path.exists(INSTALLER_LOG_PATH):
+                    try:
+                        zf.write(INSTALLER_LOG_PATH, "installer.log")
+                    except Exception:
+                        pass
                 
-                # 2. Power monitor journal
+                # 3. Power monitor journal
                 try:
                     result = subprocess.run(
                         ["journalctl", "--user", "-u", "keyboard-backlight-power-monitor", 
@@ -1148,7 +1161,7 @@ class Main(QtWidgets.QWidget):
                 except Exception:
                     pass
                 
-                # 3. Resume service journal
+                # 4. Resume service journal
                 try:
                     result = subprocess.run(
                         ["journalctl", "--user", "-u", "keyboard-backlight-resume.service",
@@ -1160,14 +1173,14 @@ class Main(QtWidgets.QWidget):
                 except Exception:
                     pass
                 
-                # 4. User config files
+                # 5. User config files
                 if os.path.isdir(CONFIG_DIR):
                     for config_file in ["settings.json", "profile.json"]:
                         config_path = os.path.join(CONFIG_DIR, config_file)
                         if os.path.isfile(config_path):
                             zf.write(config_path, f"config/{config_file}")
                 
-                # 5. System info
+                # 6. System info
                 system_info = []
                 system_info.append(f"Export date: {datetime.now().isoformat()}")
                 system_info.append(f"App version: {APP_VERSION}")
@@ -1231,7 +1244,16 @@ class Main(QtWidgets.QWidget):
             self.tray_icon.hide()
         QtWidgets.QApplication.instance().quit()
 
+    def on_tray_menu_about_to_show(self):
+        self.sync_state_from_device()
+
     def on_tray_activated(self, reason):
+        if reason in (
+            QtWidgets.QSystemTrayIcon.Trigger,
+            QtWidgets.QSystemTrayIcon.Context,
+            QtWidgets.QSystemTrayIcon.DoubleClick,
+        ):
+            self.sync_state_from_device()
         if reason in (
             QtWidgets.QSystemTrayIcon.Trigger,
             QtWidgets.QSystemTrayIcon.DoubleClick,
@@ -1240,6 +1262,71 @@ class Main(QtWidgets.QWidget):
                 self.show_window_from_tray()
             else:
                 self.hide()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.request_state_sync()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QtCore.QEvent.WindowActivate:
+            self.request_state_sync()
+
+    def request_state_sync(self, min_interval=0.5):
+        now = time.monotonic()
+        if (now - self._last_sync_ts) < min_interval:
+            return
+        self._last_sync_ts = now
+        self.sync_state_from_device()
+
+    def sync_state_from_device(self):
+        rc, out, err = self.run_cli(
+            ["query", "--brightness", "--state"],
+            log_cmd=False,
+            log_stdout=False,
+            log_stderr=False,
+        )
+        if rc != 0:
+            message = format_cli_error(rc, out, err)
+            self.set_status(message)
+            return
+
+        brightness = None
+        state = None
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            lower = line.lower()
+            if lower in ("on", "off"):
+                state = lower
+            else:
+                try:
+                    brightness = int(line)
+                except ValueError:
+                    continue
+
+        if brightness is not None:
+            prev_suppress = self._suppress
+            self._suppress = True
+            try:
+                self.last_brightness = brightness
+                self.b_spin.setValue(brightness)
+            finally:
+                self._suppress = prev_suppress
+
+        if state == "off" or (brightness is not None and brightness == 0):
+            self.is_off = True
+        elif state == "on":
+            self.is_off = False
+        self.update_power_button()
+        parts = []
+        if state:
+            parts.append(f"state={state}")
+        if brightness is not None:
+            parts.append(f"brightness={brightness}")
+        suffix = ", ".join(parts) if parts else "unknown state"
+        self.log(f"Synced device state: {suffix}")
 
     def closeEvent(self, event):
         if self._quitting:
