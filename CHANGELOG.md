@@ -13,7 +13,7 @@
 - Log exports now include the installer log when available.
 - Sync device state when opening/activating the GUI or interacting with the system tray (click/menu), logging the result in the activity log.
 
-## v1.3 – 2026-01-03
+## v1.3.0 – 2026-01-03
 ### Installer
 - Added `--purge` flag for `--uninstall` to also remove pip packages (ite8291r3-ctl, PySide6, shiboken6).
 - Added `--purge-user-data` flag to remove user profiles, systemd user services, and autostart entries.
