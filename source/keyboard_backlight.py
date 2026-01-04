@@ -13,7 +13,7 @@ import time
 from PySide6 import QtCore, QtWidgets, QtGui
 
 APP_DISPLAY_NAME = "XMG Backlight Management"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0"
 GITHUB_REPO_URL = "https://github.com/Darayavaush-84/xmg_backlight_installer"
 NOTIFICATION_TIMEOUT_MS = 1500
 TOOL_ENV_VAR = "ITE8291R3_CTL"
@@ -586,7 +586,7 @@ def apply_effect_with_fallback(args, runner=run_cmd):
 class Main(QtWidgets.QWidget):
     def __init__(self, *, enable_tray=True):
         super().__init__()
-        self.setWindowTitle(APP_DISPLAY_NAME)
+        self.setWindowTitle(f"{APP_DISPLAY_NAME} v{APP_VERSION}")
         self.resize(980, 500)
 
         QtWidgets.QApplication.setStyle("Fusion")
