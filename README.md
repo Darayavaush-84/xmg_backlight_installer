@@ -139,4 +139,6 @@ This installer/GUI bundle builds on top of the excellent [`pobrn/ite8291r3-ctl`]
 * **GUI and installer code** (authored by **Dario Barbarino**): released under the **GNU General Public License v3.0**.
 * **Underlying driver (`ite8291r3-ctl`)**: distributed under **GNU GPL v2.0** per the upstream project. Its license text is stored in [`source/LICENSE`](source/LICENSE).
 
+**License note (driver):** `ite8291r3-ctl` is a separate GPL v2.0-only project. This repository ships its source and installs the driver via pip; the GUI only invokes the CLI and does not import or link against the driver code. This is distributed as a separate component (mere aggregation), so the GUI remains GPL v3.0 while the driver remains GPL v2.0. If you modify the driver, those changes must remain GPL v2.0 and be redistributed accordingly.
+
 When contributing, keep your changes compatible with GPL v3 for the GUI/installer and respect the upstream GPL v2 requirements for the driver portion.
