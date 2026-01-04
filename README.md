@@ -34,7 +34,7 @@ Special thanks to **Barnabás Pőcze** and contributors for the `ite8291r3-ctl` 
    ```bash
    sudo python3 install.py
    ```
-3. Launch **XMG Backlight Management** from your desktop menu and enable the automation toggles (resume + power monitor) if desired.
+3. Launch **XMG Backlight Management** from your desktop menu, the GUI will automatically load in the systray, with double click you can open it and enable the automation toggles (resume + power monitor) if desired.
 
 ## Uninstallation
 
