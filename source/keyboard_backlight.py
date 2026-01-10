@@ -68,6 +68,7 @@ SETTINGS_PATH = os.path.join(CONFIG_DIR, "settings.json")
 LOCK_FILE_PATH = os.path.join(CONFIG_DIR, "app.lock")
 RESTORE_SCRIPT = os.path.join(BASE_DIR, "restore_profile.py")
 POWER_MONITOR_SCRIPT = os.path.join(BASE_DIR, "power_state_monitor.py")
+TRANSLATIONS_DIR = os.path.join(BASE_DIR, "translations")
 RESUME_LOG_PATH = "/var/log/xmg-backlight/restore.log"
 INSTALLER_LOG_PATH = "/var/log/xmg-backlight/installer.log"
 AUTOSTART_DIR = os.path.join(os.path.expanduser("~"), ".config", "autostart")
@@ -98,7 +99,82 @@ DEFAULT_SETTINGS = {
     "dark_mode": True,
     "ac_profile": "",
     "battery_profile": "",
+    "language": "",
 }
+
+LANGUAGE_LABELS = {
+    "en": "English",
+    "it": "Italiano",
+    "de": "Deutsch",
+    "es": "Español",
+    "fr": "Français",
+}
+
+FLAG_ICON_CACHE = {}
+
+
+def build_flag_icon(code):
+    cached = FLAG_ICON_CACHE.get(code)
+    if cached is not None:
+        return cached
+
+    width, height = 20, 14
+    pixmap = QtGui.QPixmap(width, height)
+    pixmap.fill(QtCore.Qt.transparent)
+    painter = QtGui.QPainter(pixmap)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+    rect = QtCore.QRect(0, 0, width, height)
+
+    if code == "it":
+        third = width // 3
+        middle = width - 2 * third
+        painter.fillRect(0, 0, third, height, QtGui.QColor("#009246"))
+        painter.fillRect(third, 0, middle, height, QtGui.QColor("#ffffff"))
+        painter.fillRect(third + middle, 0, third, height, QtGui.QColor("#ce2b37"))
+    elif code == "fr":
+        third = width // 3
+        middle = width - 2 * third
+        painter.fillRect(0, 0, third, height, QtGui.QColor("#0055a4"))
+        painter.fillRect(third, 0, middle, height, QtGui.QColor("#ffffff"))
+        painter.fillRect(third + middle, 0, third, height, QtGui.QColor("#ef4135"))
+    elif code == "de":
+        third = height // 3
+        middle = height - 2 * third
+        painter.fillRect(0, 0, width, third, QtGui.QColor("#000000"))
+        painter.fillRect(0, third, width, middle, QtGui.QColor("#dd0000"))
+        painter.fillRect(0, third + middle, width, third, QtGui.QColor("#ffce00"))
+    elif code == "es":
+        band = height // 4
+        middle = height - 2 * band
+        painter.fillRect(0, 0, width, band, QtGui.QColor("#aa151b"))
+        painter.fillRect(0, band, width, middle, QtGui.QColor("#f1bf00"))
+        painter.fillRect(0, band + middle, width, band, QtGui.QColor("#aa151b"))
+    elif code == "en":
+        painter.fillRect(rect, QtGui.QColor("#012169"))
+        cross = max(4, height // 3)
+        inner = max(2, cross // 2)
+        cx = width // 2
+        cy = height // 2
+        painter.fillRect(cx - cross // 2, 0, cross, height, QtGui.QColor("#ffffff"))
+        painter.fillRect(0, cy - cross // 2, width, cross, QtGui.QColor("#ffffff"))
+        painter.fillRect(cx - inner // 2, 0, inner, height, QtGui.QColor("#c8102e"))
+        painter.fillRect(0, cy - inner // 2, width, inner, QtGui.QColor("#c8102e"))
+    else:
+        painter.fillRect(rect, QtGui.QColor("#64748b"))
+
+    painter.setPen(QtGui.QPen(QtGui.QColor(148, 163, 184, 160)))
+    painter.drawRect(0, 0, width - 1, height - 1)
+    painter.end()
+
+    icon = QtGui.QIcon(pixmap)
+    FLAG_ICON_CACHE[code] = icon
+    return icon
+
+
+def normalize_language_code(value):
+    if not value:
+        return ""
+    return str(value).split("-")[0].split("_")[0].lower()
 
 
 def clamp_int(value, minimum, maximum, fallback):
@@ -107,6 +183,14 @@ def clamp_int(value, minimum, maximum, fallback):
     except (TypeError, ValueError):
         return fallback
     return max(minimum, min(maximum, ivalue))
+
+
+def set_combo_by_data(combo, value):
+    idx = combo.findData(value)
+    if idx >= 0:
+        combo.setCurrentIndex(idx)
+        return True
+    return False
 
 
 def ensure_config_dir():
@@ -177,7 +261,36 @@ def sanitize_settings(data):
     base["dark_mode"] = bool(data.get("dark_mode", base["dark_mode"]))
     base["ac_profile"] = str(data.get("ac_profile", base["ac_profile"]) or "")
     base["battery_profile"] = str(data.get("battery_profile", base["battery_profile"]) or "")
+    language_value = normalize_language_code(data.get("language", ""))
+    if language_value not in LANGUAGE_LABELS:
+        language_value = ""
+    base["language"] = language_value
     return base
+
+
+def load_translations(language):
+    lang = normalize_language_code(language)
+    if not lang:
+        return {}
+    path = os.path.join(TRANSLATIONS_DIR, f"{lang}.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def detect_system_language():
+    try:
+        languages = QtCore.QLocale.system().uiLanguages() or []
+    except Exception:
+        languages = []
+    for lang in languages:
+        code = normalize_language_code(lang)
+        if code in LANGUAGE_LABELS:
+            return code
+    return "en"
 
 
 def load_settings():
@@ -600,6 +713,13 @@ class Main(QtWidgets.QWidget):
         self.setWindowIcon(base_icon)
 
         self.settings = load_settings()
+        self.language = normalize_language_code(self.settings.get("language", ""))
+        if not self.language:
+            self.language = detect_system_language()
+        if self.language not in LANGUAGE_LABELS:
+            self.language = "en"
+        self.translations = load_translations(self.language)
+        self.fallback_translations = load_translations("en")
         self.tray_supported = QtWidgets.QSystemTrayIcon.isSystemTrayAvailable()
         self.is_off = False
         self.last_brightness = 40
@@ -657,22 +777,23 @@ class Main(QtWidgets.QWidget):
         hero_text.setSpacing(6)
         hero_title = QtWidgets.QLabel(APP_DISPLAY_NAME)
         hero_title.setObjectName("heroTitle")
-        hero_subtitle = QtWidgets.QLabel(
-            "Light up your keyboard with curated profiles and thoughtful automations."
+        self.hero_subtitle = QtWidgets.QLabel(
+            self.tr("hero.subtitle")
         )
-        hero_subtitle.setWordWrap(True)
-        hero_subtitle.setObjectName("heroSubtitle")
+        self.hero_subtitle.setWordWrap(True)
+        self.hero_subtitle.setObjectName("heroSubtitle")
         hero_text.addWidget(hero_title)
-        hero_text.addWidget(hero_subtitle)
+        hero_text.addWidget(self.hero_subtitle)
 
         hardware_row = QtWidgets.QHBoxLayout()
         hardware_row.setSpacing(8)
-        hardware_caption = QtWidgets.QLabel("Hardware")
-        hardware_caption.setObjectName("heroCaption")
-        self.hardware_label = QtWidgets.QLabel("Hardware: unknown")
+        self.hardware_caption = QtWidgets.QLabel(self.tr("hero.hardware"))
+        self.hardware_caption.setObjectName("heroCaption")
+        self.hardware_label = QtWidgets.QLabel(self.tr("hero.hardware_unknown"))
         self.hardware_label.setWordWrap(True)
         self.hardware_label.setObjectName("hardwareBadge")
-        hardware_row.addWidget(hardware_caption)
+        self.hardware_detected = False
+        hardware_row.addWidget(self.hardware_caption)
         hardware_row.addWidget(self.hardware_label, 1)
         hero_text.addLayout(hardware_row)
 
@@ -681,13 +802,17 @@ class Main(QtWidgets.QWidget):
         hero_controls = QtWidgets.QVBoxLayout()
         hero_controls.setSpacing(12)
         hero_controls.addStretch(1)
-        self.github_button = QtWidgets.QPushButton("GitHub")
+        top_row = QtWidgets.QHBoxLayout()
+        top_row.setSpacing(10)
+        top_row.addStretch(1)
+        self.github_button = QtWidgets.QPushButton(self.tr("buttons.github"))
         self.github_button.setObjectName("pillButton")
-        hero_controls.addWidget(self.github_button, 0, QtCore.Qt.AlignRight)
-        self.export_logs_button = QtWidgets.QPushButton("Export logs")
+        top_row.addWidget(self.github_button)
+        hero_controls.addLayout(top_row)
+        self.export_logs_button = QtWidgets.QPushButton(self.tr("buttons.export_logs"))
         self.export_logs_button.setObjectName("pillButton")
         hero_controls.addWidget(self.export_logs_button, 0, QtCore.Qt.AlignRight)
-        self.log_toggle_button = QtWidgets.QPushButton("Show activity log")
+        self.log_toggle_button = QtWidgets.QPushButton(self.tr("buttons.show_activity_log"))
         self.log_toggle_button.setCheckable(True)
         self.log_toggle_button.setObjectName("pillButton")
         hero_controls.addWidget(self.log_toggle_button, 0, QtCore.Qt.AlignRight)
@@ -713,21 +838,22 @@ class Main(QtWidgets.QWidget):
         bc_layout.setContentsMargins(24, 24, 24, 24)
         bc_layout.setSpacing(18)
 
-        bright_title = QtWidgets.QLabel("Brightness & power")
-        bright_title.setObjectName("sectionTitle")
-        bc_layout.addWidget(bright_title)
+        self.bright_title = QtWidgets.QLabel(self.tr("brightness.title"))
+        self.bright_title.setObjectName("sectionTitle")
+        bc_layout.addWidget(self.bright_title)
 
-        bright_caption = QtWidgets.QLabel("Control intensity (0–50) and toggle the keyboard instantly.")
-        bright_caption.setObjectName("sectionSubtitle")
-        bright_caption.setWordWrap(True)
-        bc_layout.addWidget(bright_caption)
+        self.bright_caption = QtWidgets.QLabel(self.tr("brightness.subtitle"))
+        self.bright_caption.setObjectName("sectionSubtitle")
+        self.bright_caption.setWordWrap(True)
+        bc_layout.addWidget(self.bright_caption)
 
         gl = QtWidgets.QGridLayout()
         gl.setColumnStretch(1, 1)
         gl.setHorizontalSpacing(16)
         gl.setVerticalSpacing(12)
 
-        gl.addWidget(QtWidgets.QLabel("Value"), 0, 0)
+        self.brightness_value_label = QtWidgets.QLabel(self.tr("brightness.value"))
+        gl.addWidget(self.brightness_value_label, 0, 0)
         self.b_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.b_slider.setRange(0, 50)
         self.b_slider.setValue(self.last_brightness)
@@ -741,7 +867,7 @@ class Main(QtWidgets.QWidget):
         gl.addWidget(self.b_spin, 0, 2)
         bc_layout.addLayout(gl)
 
-        self.btn_power = QtWidgets.QPushButton("Turn on")
+        self.btn_power = QtWidgets.QPushButton(self.tr("buttons.turn_on"))
         self.btn_power.setObjectName("powerButton")
         self.btn_power.setMinimumHeight(52)
         bc_layout.addWidget(self.btn_power)
@@ -755,34 +881,37 @@ class Main(QtWidgets.QWidget):
         mode_layout.setSpacing(18)
 
         mode_header = QtWidgets.QHBoxLayout()
-        mode_title = QtWidgets.QLabel("Effects & colors")
-        mode_title.setObjectName("sectionTitle")
-        mode_header.addWidget(mode_title)
+        self.mode_title = QtWidgets.QLabel(self.tr("effects.title"))
+        self.mode_title.setObjectName("sectionTitle")
+        mode_header.addWidget(self.mode_title)
         mode_header.addStretch(1)
-        self.apply_button = QtWidgets.QPushButton("Apply")
+        self.apply_button = QtWidgets.QPushButton(self.tr("buttons.apply"))
         self.apply_button.setObjectName("applyButton")
         self.apply_button.setEnabled(False)
         mode_header.addWidget(self.apply_button)
         mode_layout.addLayout(mode_header)
 
-        mode_caption = QtWidgets.QLabel("Pick static hues or animated scenes with direction and reactivity.")
-        mode_caption.setWordWrap(True)
-        mode_caption.setObjectName("sectionSubtitle")
-        mode_layout.addWidget(mode_caption)
+        self.mode_caption = QtWidgets.QLabel(self.tr("effects.subtitle"))
+        self.mode_caption.setWordWrap(True)
+        self.mode_caption.setObjectName("sectionSubtitle")
+        mode_layout.addWidget(self.mode_caption)
 
         mode_row = QtWidgets.QHBoxLayout()
         mode_row.setSpacing(16)
-        mode_row.addWidget(QtWidgets.QLabel("Effect"))
+        self.mode_label = QtWidgets.QLabel(self.tr("effects.effect"))
+        mode_row.addWidget(self.mode_label)
         self.mode = QtWidgets.QComboBox()
-        self.mode.addItems(EFFECTS)
-        self.mode.setCurrentText("static")
+        for effect in EFFECTS:
+            self.mode.addItem(self.tr(f"effect.{effect}"), effect)
+        set_combo_by_data(self.mode, "static")
         mode_row.addWidget(self.mode, 1)
 
-        self.static_label = QtWidgets.QLabel("Static color")
+        self.static_label = QtWidgets.QLabel(self.tr("effects.static_color"))
         mode_row.addWidget(self.static_label)
         self.static_color = QtWidgets.QComboBox()
-        self.static_color.addItems(COLORS)
-        self.static_color.setCurrentText(self.last_static_color)
+        for color in COLORS:
+            self.static_color.addItem(self.tr(f"color.{color}"), color)
+        set_combo_by_data(self.static_color, self.last_static_color)
         mode_row.addWidget(self.static_color, 1)
         mode_layout.addLayout(mode_row)
 
@@ -792,26 +921,32 @@ class Main(QtWidgets.QWidget):
         epl.setHorizontalSpacing(16)
         epl.setVerticalSpacing(12)
 
-        epl.addWidget(QtWidgets.QLabel("Speed (0–10)"), 0, 0)
+        self.speed_label = QtWidgets.QLabel(self.tr("effects.speed"))
+        epl.addWidget(self.speed_label, 0, 0)
         self.speed = QtWidgets.QSpinBox()
         self.speed.setRange(0, 10)
         self.speed.setValue(5)
         self.speed.setButtonSymbols(QtWidgets.QSpinBox.NoButtons)
         epl.addWidget(self.speed, 0, 1)
 
-        epl.addWidget(QtWidgets.QLabel("Dynamic color"), 0, 2)
+        self.dynamic_color_label = QtWidgets.QLabel(self.tr("effects.dynamic_color"))
+        epl.addWidget(self.dynamic_color_label, 0, 2)
         self.color = QtWidgets.QComboBox()
-        self.color.addItems(["none"] + COLORS)
-        self.color.setCurrentText("none")
+        self.color.addItem(self.tr("color.none"), "none")
+        for color in COLORS:
+            self.color.addItem(self.tr(f"color.{color}"), color)
+        set_combo_by_data(self.color, "none")
         epl.addWidget(self.color, 0, 3)
 
-        self.reactive = QtWidgets.QCheckBox("Reactive mode (-r)")
+        self.reactive = QtWidgets.QCheckBox(self.tr("effects.reactive"))
         epl.addWidget(self.reactive, 1, 1)
 
-        epl.addWidget(QtWidgets.QLabel("Direction"), 1, 2)
+        self.direction_label = QtWidgets.QLabel(self.tr("effects.direction"))
+        epl.addWidget(self.direction_label, 1, 2)
         self.direction = QtWidgets.QComboBox()
-        self.direction.addItems(DIRECTIONS)
-        self.direction.setCurrentText("none")
+        for direction in DIRECTIONS:
+            self.direction.addItem(self.tr(f"direction.{direction}"), direction)
+        set_combo_by_data(self.direction, "none")
         epl.addWidget(self.direction, 1, 3)
 
         mode_layout.addWidget(self.effect_panel)
@@ -823,38 +958,39 @@ class Main(QtWidgets.QWidget):
         profiles_layout.setContentsMargins(24, 24, 24, 24)
         profiles_layout.setSpacing(16)
 
-        profiles_title = QtWidgets.QLabel("Quick profiles")
-        profiles_title.setObjectName("sectionTitle")
-        profiles_layout.addWidget(profiles_title)
+        self.profiles_title = QtWidgets.QLabel(self.tr("profiles.title"))
+        self.profiles_title.setObjectName("sectionTitle")
+        profiles_layout.addWidget(self.profiles_title)
 
-        profiles_caption = QtWidgets.QLabel("Save your presets and recall them in one click.")
-        profiles_caption.setWordWrap(True)
-        profiles_caption.setObjectName("sectionSubtitle")
-        profiles_layout.addWidget(profiles_caption)
+        self.profiles_caption = QtWidgets.QLabel(self.tr("profiles.subtitle"))
+        self.profiles_caption.setWordWrap(True)
+        self.profiles_caption.setObjectName("sectionSubtitle")
+        profiles_layout.addWidget(self.profiles_caption)
 
         pl = QtWidgets.QGridLayout()
         pl.setColumnStretch(1, 1)
         pl.setHorizontalSpacing(12)
         pl.setVerticalSpacing(10)
-        pl.addWidget(QtWidgets.QLabel("Active profile"), 0, 0)
+        self.active_profile_label = QtWidgets.QLabel(self.tr("profiles.active"))
+        pl.addWidget(self.active_profile_label, 0, 0)
         self.profile_combo = QtWidgets.QComboBox()
         pl.addWidget(self.profile_combo, 0, 1, 1, 2)
-        self.btn_profile_save = QtWidgets.QPushButton("Save")
+        self.btn_profile_save = QtWidgets.QPushButton(self.tr("buttons.save"))
         pl.addWidget(self.btn_profile_save, 0, 3)
-        self.btn_profile_new = QtWidgets.QPushButton("New…")
+        self.btn_profile_new = QtWidgets.QPushButton(self.tr("buttons.new"))
         pl.addWidget(self.btn_profile_new, 1, 0)
-        self.btn_profile_save_as = QtWidgets.QPushButton("Save as…")
+        self.btn_profile_save_as = QtWidgets.QPushButton(self.tr("buttons.save_as"))
         pl.addWidget(self.btn_profile_save_as, 1, 1)
-        self.btn_profile_rename = QtWidgets.QPushButton("Rename…")
+        self.btn_profile_rename = QtWidgets.QPushButton(self.tr("buttons.rename"))
         pl.addWidget(self.btn_profile_rename, 1, 2)
-        self.btn_profile_delete = QtWidgets.QPushButton("Delete")
+        self.btn_profile_delete = QtWidgets.QPushButton(self.tr("buttons.delete"))
         pl.addWidget(self.btn_profile_delete, 1, 3)
         profiles_layout.addLayout(pl)
 
-        pp_title = QtWidgets.QLabel("Power-based profiles")
-        pp_title.setObjectName("sectionTitle")
-        pp_title.setContentsMargins(0, 12, 0, 0)
-        profiles_layout.addWidget(pp_title)
+        self.pp_title = QtWidgets.QLabel(self.tr("profiles.power_title"))
+        self.pp_title.setObjectName("sectionTitle")
+        self.pp_title.setContentsMargins(0, 12, 0, 0)
+        profiles_layout.addWidget(self.pp_title)
 
         power_profiles_row = QtWidgets.QFrame()
         power_profiles_row.setObjectName("helperRow")
@@ -864,16 +1000,16 @@ class Main(QtWidgets.QWidget):
         pp_layout.setVerticalSpacing(8)
         pp_layout.setColumnStretch(1, 1)
 
-        ac_label = QtWidgets.QLabel("On AC:")
-        pp_layout.addWidget(ac_label, 0, 0)
+        self.ac_label = QtWidgets.QLabel(self.tr("profiles.on_ac"))
+        pp_layout.addWidget(self.ac_label, 0, 0)
         self.ac_profile_combo = QtWidgets.QComboBox()
-        self.ac_profile_combo.setToolTip("Profile to apply when connected to AC power")
+        self.ac_profile_combo.setToolTip(self.tr("profiles.on_ac_tooltip"))
         pp_layout.addWidget(self.ac_profile_combo, 0, 1)
 
-        battery_label = QtWidgets.QLabel("On Battery:")
-        pp_layout.addWidget(battery_label, 1, 0)
+        self.battery_label = QtWidgets.QLabel(self.tr("profiles.on_battery"))
+        pp_layout.addWidget(self.battery_label, 1, 0)
         self.battery_profile_combo = QtWidgets.QComboBox()
-        self.battery_profile_combo.setToolTip("Profile to apply when running on battery")
+        self.battery_profile_combo.setToolTip(self.tr("profiles.on_battery_tooltip"))
         pp_layout.addWidget(self.battery_profile_combo, 1, 1)
 
         profiles_layout.addWidget(power_profiles_row)
@@ -886,16 +1022,16 @@ class Main(QtWidgets.QWidget):
         helper_layout.setContentsMargins(24, 24, 24, 24)
         helper_layout.setSpacing(16)
 
-        helper_title = QtWidgets.QLabel("Smart automations")
-        helper_title.setObjectName("sectionTitle")
-        helper_layout.addWidget(helper_title)
+        self.helper_title = QtWidgets.QLabel(self.tr("smart.title"))
+        self.helper_title.setObjectName("sectionTitle")
+        helper_layout.addWidget(self.helper_title)
 
-        helper_intro = QtWidgets.QLabel(
-            "Enable background services to restore your colors on login, resume or power-source changes."
+        self.helper_intro = QtWidgets.QLabel(
+            self.tr("smart.subtitle")
         )
-        helper_intro.setWordWrap(True)
-        helper_intro.setObjectName("sectionSubtitle")
-        helper_layout.addWidget(helper_intro)
+        self.helper_intro.setWordWrap(True)
+        self.helper_intro.setObjectName("sectionSubtitle")
+        helper_layout.addWidget(self.helper_intro)
 
         helper_list = QtWidgets.QVBoxLayout()
         helper_list.setSpacing(10)
@@ -915,7 +1051,7 @@ class Main(QtWidgets.QWidget):
             info.setFixedSize(24, 24)
             label = QtWidgets.QLabel(title)
             label.setObjectName("helperLabel")
-            flag = QtWidgets.QPushButton("Disabled")
+            flag = QtWidgets.QPushButton(self.tr("status.disabled"))
             flag.setCheckable(True)
             flag.setCursor(QtCore.Qt.PointingHandCursor)
             flag.setObjectName("helperFlag")
@@ -939,25 +1075,43 @@ class Main(QtWidgets.QWidget):
 
             helper_list.addWidget(row)
             helper_list.addWidget(detail)
-            return flag, detail
+            return flag, detail, label, info, row
 
-        self.autostart_flag, self.autostart_status_label = helper_entry(
-            "Autostart on login",
-            (
-                "Restore the saved keyboard profile when your desktop session begins.\n"
-                f"Desktop entry path: {AUTOSTART_ENTRY}"
+        (
+            self.autostart_flag,
+            self.autostart_status_label,
+            self.autostart_label,
+            self.autostart_info_button,
+            self.autostart_row,
+        ) = helper_entry(
+            self.tr("smart.autostart_title"),
+            self.tr(
+                "smart.autostart_tooltip",
+                path=AUTOSTART_ENTRY,
             ),
         )
 
-        self.resume_flag, self.resume_status_label = helper_entry(
-            "Resume restore",
-            "Reapply the profile immediately after suspend, hibernate or hybrid sleep.",
+        (
+            self.resume_flag,
+            self.resume_status_label,
+            self.resume_label,
+            self.resume_info_button,
+            self.resume_row,
+        ) = helper_entry(
+            self.tr("smart.resume_title"),
+            self.tr("smart.resume_tooltip"),
             selectable=True,
         )
 
-        self.power_monitor_flag, self.power_monitor_status_label = helper_entry(
-            "Power monitor",
-            "Listen for AC/battery switches and reapply the profile when the source changes.",
+        (
+            self.power_monitor_flag,
+            self.power_monitor_status_label,
+            self.power_monitor_label,
+            self.power_monitor_info_button,
+            self.power_monitor_row,
+        ) = helper_entry(
+            self.tr("smart.power_monitor_title"),
+            self.tr("smart.power_monitor_tooltip"),
             selectable=True,
         )
 
@@ -966,10 +1120,21 @@ class Main(QtWidgets.QWidget):
         settings_layout.setContentsMargins(0, 12, 0, 0)
         settings_layout.setSpacing(12)
         settings_layout.addStretch(1)
-        self.dark_mode_checkbox = QtWidgets.QCheckBox("Dark Mode")
+        self.language_combo = QtWidgets.QComboBox()
+        self.language_combo.setObjectName("languageCombo")
+        self.language_combo.setToolTip(self.tr("language.tooltip"))
+        self.language_combo.setMinimumWidth(140)
+        self.language_combo.setIconSize(QtCore.QSize(20, 14))
+        for code, label in LANGUAGE_LABELS.items():
+            self.language_combo.addItem(build_flag_icon(code), label, code)
+        lang_index = self.language_combo.findData(self.language)
+        if lang_index >= 0:
+            self.language_combo.setCurrentIndex(lang_index)
+        settings_layout.addWidget(self.language_combo)
+        self.dark_mode_checkbox = QtWidgets.QCheckBox(self.tr("settings.dark_mode"))
         self.dark_mode_checkbox.setChecked(self.settings.get("dark_mode", False))
         settings_layout.addWidget(self.dark_mode_checkbox)
-        self.notifications_checkbox = QtWidgets.QCheckBox("Show notifications")
+        self.notifications_checkbox = QtWidgets.QCheckBox(self.tr("settings.notifications"))
         self.notifications_checkbox.setChecked(self.settings.get("show_notifications", True))
         settings_layout.addWidget(self.notifications_checkbox)
         helper_layout.addWidget(settings_row)
@@ -980,7 +1145,7 @@ class Main(QtWidgets.QWidget):
         surface_layout.addStretch(1)
         self.log_window = QtWidgets.QDialog(self)
         self.log_window.setObjectName("logWindow")
-        self.log_window.setWindowTitle("Activity log")
+        self.log_window.setWindowTitle(self.tr("log.title"))
         self.log_window.setModal(False)
         self.log_window.setSizeGripEnabled(True)
         self.log_window.setMinimumSize(520, 260)
@@ -998,11 +1163,11 @@ class Main(QtWidgets.QWidget):
 
         log_header = QtWidgets.QHBoxLayout()
         log_header.setSpacing(12)
-        log_title = QtWidgets.QLabel("Activity log")
-        log_title.setObjectName("sectionTitle")
-        log_header.addWidget(log_title)
+        self.log_title = QtWidgets.QLabel(self.tr("log.title"))
+        self.log_title.setObjectName("sectionTitle")
+        log_header.addWidget(self.log_title)
         log_header.addStretch(1)
-        self.log_close_button = QtWidgets.QPushButton("Close")
+        self.log_close_button = QtWidgets.QPushButton(self.tr("buttons.close"))
         self.log_close_button.setObjectName("pillButton")
         log_header.addWidget(self.log_close_button)
         log_layout.addLayout(log_header)
@@ -1023,6 +1188,7 @@ class Main(QtWidgets.QWidget):
         self.export_logs_button.clicked.connect(self.on_export_logs_clicked)
         self.log_toggle_button.toggled.connect(self.on_log_toggle_toggled)
         self.log_close_button.clicked.connect(self.on_log_close_clicked)
+        self.language_combo.currentIndexChanged.connect(self.on_language_changed)
 
         self.apply_timer = QtCore.QTimer(self)
         self.apply_timer.setSingleShot(True)
@@ -1036,10 +1202,11 @@ class Main(QtWidgets.QWidget):
 
         self.detect_device()
         self.apply_styles()
-        self.update_panels()
-        self.update_power_button()
         if self.profile_data:
             self.load_profile_into_controls(self.profile_data)
+        self.apply_language()
+        self.update_panels()
+        self.update_power_button()
 
         self.b_slider.valueChanged.connect(self.b_spin.setValue)
         self.b_spin.valueChanged.connect(self.b_slider.setValue)
@@ -1108,6 +1275,186 @@ class Main(QtWidgets.QWidget):
         if hasattr(self, "log_window") and self.log_window.isVisible():
             self._fit_log_window()
 
+    def tr(self, key, **kwargs):
+        text = self.translations.get(key) or self.fallback_translations.get(key) or key
+        if kwargs:
+            try:
+                return text.format(**kwargs)
+            except (KeyError, ValueError):
+                return text
+        return text
+
+    def set_language(self, language, *, save=False):
+        lang = normalize_language_code(language)
+        if lang not in LANGUAGE_LABELS:
+            lang = "en"
+        if lang == self.language and self.translations:
+            if save:
+                self.settings["language"] = lang
+                self.save_settings()
+            return
+        self.language = lang
+        self.translations = load_translations(lang)
+        self.fallback_translations = load_translations("en")
+        if hasattr(self, "language_combo"):
+            blocker = QtCore.QSignalBlocker(self.language_combo)
+            try:
+                idx = self.language_combo.findData(lang)
+                if idx >= 0:
+                    self.language_combo.setCurrentIndex(idx)
+            finally:
+                del blocker
+        if save:
+            self.settings["language"] = lang
+            self.save_settings()
+        self.apply_language()
+
+    def refresh_effect_combos(self):
+        mode_value = self.mode.currentData() or "static"
+        static_value = self.static_color.currentData() or self.last_static_color
+        color_value = self.color.currentData() or "none"
+        direction_value = self.direction.currentData() or "none"
+
+        mode_blocker = QtCore.QSignalBlocker(self.mode)
+        static_blocker = QtCore.QSignalBlocker(self.static_color)
+        color_blocker = QtCore.QSignalBlocker(self.color)
+        direction_blocker = QtCore.QSignalBlocker(self.direction)
+        try:
+            self.mode.clear()
+            for effect in EFFECTS:
+                self.mode.addItem(self.tr(f"effect.{effect}"), effect)
+            set_combo_by_data(self.mode, mode_value)
+
+            self.static_color.clear()
+            for color in COLORS:
+                self.static_color.addItem(self.tr(f"color.{color}"), color)
+            set_combo_by_data(self.static_color, static_value)
+
+            self.color.clear()
+            self.color.addItem(self.tr("color.none"), "none")
+            for color in COLORS:
+                self.color.addItem(self.tr(f"color.{color}"), color)
+            set_combo_by_data(self.color, color_value)
+
+            self.direction.clear()
+            for direction in DIRECTIONS:
+                self.direction.addItem(self.tr(f"direction.{direction}"), direction)
+            set_combo_by_data(self.direction, direction_value)
+        finally:
+            del mode_blocker
+            del static_blocker
+            del color_blocker
+            del direction_blocker
+
+    def apply_language(self):
+        self.hero_subtitle.setText(self.tr("hero.subtitle"))
+        self.hardware_caption.setText(self.tr("hero.hardware"))
+        if not getattr(self, "hardware_detected", False):
+            self.hardware_label.setText(self.tr("hero.hardware_unknown"))
+        self.github_button.setText(self.tr("buttons.github"))
+        self.export_logs_button.setText(self.tr("buttons.export_logs"))
+        self.log_toggle_button.setText(
+            self.tr("buttons.hide_activity_log")
+            if self.log_toggle_button.isChecked()
+            else self.tr("buttons.show_activity_log")
+        )
+        self.language_combo.setToolTip(self.tr("language.tooltip"))
+
+        self.bright_title.setText(self.tr("brightness.title"))
+        self.bright_caption.setText(self.tr("brightness.subtitle"))
+        self.brightness_value_label.setText(self.tr("brightness.value"))
+
+        self.apply_button.setText(self.tr("buttons.apply"))
+        self.mode_title.setText(self.tr("effects.title"))
+        self.mode_caption.setText(self.tr("effects.subtitle"))
+        self.mode_label.setText(self.tr("effects.effect"))
+        self.static_label.setText(self.tr("effects.static_color"))
+        self.speed_label.setText(self.tr("effects.speed"))
+        self.dynamic_color_label.setText(self.tr("effects.dynamic_color"))
+        self.reactive.setText(self.tr("effects.reactive"))
+        self.direction_label.setText(self.tr("effects.direction"))
+        self.refresh_effect_combos()
+
+        self.profiles_title.setText(self.tr("profiles.title"))
+        self.profiles_caption.setText(self.tr("profiles.subtitle"))
+        self.active_profile_label.setText(self.tr("profiles.active"))
+        self.btn_profile_new.setText(self.tr("buttons.new"))
+        self.btn_profile_save_as.setText(self.tr("buttons.save_as"))
+        self.btn_profile_rename.setText(self.tr("buttons.rename"))
+        self.btn_profile_delete.setText(self.tr("buttons.delete"))
+        self.pp_title.setText(self.tr("profiles.power_title"))
+        self.ac_label.setText(self.tr("profiles.on_ac"))
+        self.battery_label.setText(self.tr("profiles.on_battery"))
+        self.ac_profile_combo.setToolTip(self.tr("profiles.on_ac_tooltip"))
+        self.battery_profile_combo.setToolTip(self.tr("profiles.on_battery_tooltip"))
+
+        self.helper_title.setText(self.tr("smart.title"))
+        self.helper_intro.setText(self.tr("smart.subtitle"))
+        autostart_tooltip = self.tr(
+            "smart.autostart_tooltip",
+            path=AUTOSTART_ENTRY,
+        )
+        for widget in (
+            self.autostart_row,
+            self.autostart_label,
+            self.autostart_info_button,
+            self.autostart_flag,
+            self.autostart_status_label,
+        ):
+            widget.setToolTip(autostart_tooltip)
+            widget.setToolTipDuration(0)
+        self.autostart_label.setText(self.tr("smart.autostart_title"))
+
+        resume_tooltip = self.tr("smart.resume_tooltip")
+        for widget in (
+            self.resume_row,
+            self.resume_label,
+            self.resume_info_button,
+            self.resume_flag,
+            self.resume_status_label,
+        ):
+            widget.setToolTip(resume_tooltip)
+            widget.setToolTipDuration(0)
+        self.resume_label.setText(self.tr("smart.resume_title"))
+
+        power_tooltip = self.tr("smart.power_monitor_tooltip")
+        for widget in (
+            self.power_monitor_row,
+            self.power_monitor_label,
+            self.power_monitor_info_button,
+            self.power_monitor_flag,
+            self.power_monitor_status_label,
+        ):
+            widget.setToolTip(power_tooltip)
+            widget.setToolTipDuration(0)
+        self.power_monitor_label.setText(self.tr("smart.power_monitor_title"))
+
+        self.dark_mode_checkbox.setText(self.tr("settings.dark_mode"))
+        self.notifications_checkbox.setText(self.tr("settings.notifications"))
+
+        self.log_window.setWindowTitle(self.tr("log.title"))
+        self.log_title.setText(self.tr("log.title"))
+        self.log_close_button.setText(self.tr("buttons.close"))
+
+        if hasattr(self, "tray_show_action"):
+            self.tray_show_action.setText(self.tr("tray.show_window"))
+        if hasattr(self, "tray_turn_on_action"):
+            self.tray_turn_on_action.setText(self.tr("tray.turn_on"))
+        if hasattr(self, "tray_turn_off_action"):
+            self.tray_turn_off_action.setText(self.tr("tray.turn_off"))
+        if hasattr(self, "tray_quit_action"):
+            self.tray_quit_action.setText(self.tr("tray.quit"))
+        if hasattr(self, "tray_profiles_menu"):
+            self.tray_profiles_menu.setTitle(self.tr("tray.profiles"))
+
+        self.update_profile_save_state()
+        self.refresh_autostart_flag()
+        self.refresh_resume_controls()
+        self.refresh_power_monitor_controls()
+        self.refresh_power_profile_combos()
+        self.update_panels()
+        self.update_power_button()
+
     def save_settings(self):
         try:
             write_settings_file(self.settings)
@@ -1129,26 +1476,26 @@ class Main(QtWidgets.QWidget):
             self.tray_icon = QtWidgets.QSystemTrayIcon(self.windowIcon(), self)
             menu = QtWidgets.QMenu(self)
             menu.aboutToShow.connect(self.on_tray_menu_about_to_show)
-            show_action = menu.addAction("Show window")
-            show_action.triggered.connect(self.show_window_from_tray)
+            self.tray_show_action = menu.addAction(self.tr("tray.show_window"))
+            self.tray_show_action.triggered.connect(self.show_window_from_tray)
             menu.addSeparator()
-            turn_on_action = menu.addAction("Turn on")
-            turn_on_action.triggered.connect(self.on_tray_turn_on)
-            turn_off_action = menu.addAction("Turn off")
-            turn_off_action.triggered.connect(self.on_tray_turn_off)
+            self.tray_turn_on_action = menu.addAction(self.tr("tray.turn_on"))
+            self.tray_turn_on_action.triggered.connect(self.on_tray_turn_on)
+            self.tray_turn_off_action = menu.addAction(self.tr("tray.turn_off"))
+            self.tray_turn_off_action.triggered.connect(self.on_tray_turn_off)
             menu.addSeparator()
-            self.tray_profiles_menu = menu.addMenu("Profiles")
+            self.tray_profiles_menu = menu.addMenu(self.tr("tray.profiles"))
             self.rebuild_tray_profiles_menu()
             menu.addSeparator()
-            quit_action = menu.addAction("Quit")
-            quit_action.triggered.connect(self.on_tray_quit)
+            self.tray_quit_action = menu.addAction(self.tr("tray.quit"))
+            self.tray_quit_action.triggered.connect(self.on_tray_quit)
             self.tray_icon.setContextMenu(menu)
             self.tray_icon.activated.connect(self.on_tray_activated)
         if self.tray_icon:
             self.tray_icon.show()
         if self.settings.get("start_in_tray", False) and self.tray_icon:
             self.hide()
-            self.notify(APP_DISPLAY_NAME, "Minimized to tray.")
+            self.notify(APP_DISPLAY_NAME, self.tr("notify.minimized_to_tray"))
 
     def on_log_toggle_toggled(self, checked):
         if not hasattr(self, "log_window"):
@@ -1162,8 +1509,16 @@ class Main(QtWidgets.QWidget):
             self.log_window.hide()
         if hasattr(self, "log_toggle_button"):
             self.log_toggle_button.setText(
-                "Hide activity log" if checked else "Show activity log"
+                self.tr("buttons.hide_activity_log")
+                if checked
+                else self.tr("buttons.show_activity_log")
             )
+
+    def on_language_changed(self, _index):
+        language = self.language_combo.currentData()
+        if not language:
+            return
+        self.set_language(language, save=True)
 
     def on_log_close_clicked(self):
         if hasattr(self, "log_window"):
@@ -1175,7 +1530,7 @@ class Main(QtWidgets.QWidget):
         blocker = QtCore.QSignalBlocker(self.log_toggle_button)
         try:
             self.log_toggle_button.setChecked(False)
-            self.log_toggle_button.setText("Show activity log")
+            self.log_toggle_button.setText(self.tr("buttons.show_activity_log"))
         finally:
             del blocker
 
@@ -1281,9 +1636,9 @@ class Main(QtWidgets.QWidget):
         default_name = f"xmg-backlight-logs-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
         file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Export Logs",
+            self.tr("dialogs.export_logs.title"),
             os.path.expanduser(f"~/{default_name}"),
-            "ZIP files (*.zip)"
+            self.tr("dialogs.export_logs.filter")
         )
         if not file_path:
             return
@@ -1357,13 +1712,15 @@ class Main(QtWidgets.QWidget):
                 zf.writestr("system-info.txt", "\n".join(system_info))
             
             QtWidgets.QMessageBox.information(
-                self, "Export Complete",
-                f"Logs exported successfully to:\n{file_path}"
+                self,
+                self.tr("dialogs.export_logs.complete_title"),
+                self.tr("dialogs.export_logs.complete_message", path=file_path),
             )
         except Exception as e:
             QtWidgets.QMessageBox.warning(
-                self, "Export Failed",
-                f"Failed to export logs:\n{str(e)}"
+                self,
+                self.tr("dialogs.export_logs.failed_title"),
+                self.tr("dialogs.export_logs.failed_message", error=str(e)),
             )
 
     def show_window_from_tray(self):
@@ -1373,11 +1730,11 @@ class Main(QtWidgets.QWidget):
 
     def on_tray_turn_on(self):
         self.on_power_on()
-        self.notify(APP_DISPLAY_NAME, "Backlight turned on.")
+        self.notify(APP_DISPLAY_NAME, self.tr("notify.backlight_on"))
 
     def on_tray_turn_off(self):
         self.on_power_off()
-        self.notify(APP_DISPLAY_NAME, "Backlight turned off.")
+        self.notify(APP_DISPLAY_NAME, self.tr("notify.backlight_off"))
 
     def rebuild_tray_profiles_menu(self):
         if not hasattr(self, "tray_profiles_menu"):
@@ -1392,13 +1749,13 @@ class Main(QtWidgets.QWidget):
     def on_tray_profile_selected(self, name):
         if name == self.active_profile_name:
             self.restore_profile_after_startup()
-            self.notify(APP_DISPLAY_NAME, f"Profile '{name}' reapplied.")
+            self.notify(APP_DISPLAY_NAME, self.tr("notify.profile_reapplied", name=name))
             return
         if not self.switch_active_profile(name, triggered_by_user=True):
             self.rebuild_tray_profiles_menu()
             return
         self.rebuild_tray_profiles_menu()
-        self.notify(APP_DISPLAY_NAME, f"Profile '{name}' applied.")
+        self.notify(APP_DISPLAY_NAME, self.tr("notify.profile_applied", name=name))
 
     def on_tray_quit(self):
         self._quitting = True
@@ -1424,13 +1781,13 @@ class Main(QtWidgets.QWidget):
                 self.show_window_from_tray()
             else:
                 reverted = self.revert_unsaved_preview(
-                    "Preview discarded after hiding the window."
+                    self.tr("status.preview_discarded_hide")
                 )
                 self.hide()
                 if reverted:
                     self.notify(
                         APP_DISPLAY_NAME,
-                        "Unsaved preview discarded. Previous profile restored.",
+                        self.tr("notify.preview_discarded"),
                     )
 
     def showEvent(self, event):
@@ -1495,12 +1852,12 @@ class Main(QtWidgets.QWidget):
             parts.append(f"state={state}")
         if brightness is not None:
             parts.append(f"brightness={brightness}")
-        suffix = ", ".join(parts) if parts else "unknown state"
-        self.log(f"Synced device state: {suffix}")
+        suffix = ", ".join(parts) if parts else self.tr("log.unknown_state")
+        self.log(self.tr("log.synced_device_state", details=suffix))
 
     def closeEvent(self, event):
         reverted = self.revert_unsaved_preview(
-            "Preview discarded after closing the window."
+            self.tr("status.preview_discarded_close")
         )
         if self._quitting:
             return super().closeEvent(event)
@@ -1512,12 +1869,9 @@ class Main(QtWidgets.QWidget):
             event.ignore()
             self.hide()
             if not self._tray_close_hint_shown:
-                message = "Still running in tray. Quit from tray menu."
+                message = self.tr("notify.tray_hint")
                 if reverted:
-                    message = (
-                        "Still running in tray. "
-                        "Unsaved preview discarded and previous profile restored."
-                    )
+                    message = self.tr("notify.tray_hint_preview")
                 self.notify(APP_DISPLAY_NAME, message)
                 self._tray_close_hint_shown = True
             return
@@ -1541,25 +1895,29 @@ class Main(QtWidgets.QWidget):
     def refresh_power_profile_combos(self):
         if not hasattr(self, "ac_profile_combo") or not hasattr(self, "battery_profile_combo"):
             return
-        profile_names = ["(none)"] + list(self.profile_store["profiles"].keys())
+        none_label = self.tr("profiles.none_option")
+        profile_names = list(self.profile_store["profiles"].keys())
 
         ac_blocker = QtCore.QSignalBlocker(self.ac_profile_combo)
         battery_blocker = QtCore.QSignalBlocker(self.battery_profile_combo)
         try:
             self.ac_profile_combo.clear()
             self.battery_profile_combo.clear()
-            self.ac_profile_combo.addItems(profile_names)
-            self.battery_profile_combo.addItems(profile_names)
+            self.ac_profile_combo.addItem(none_label, "")
+            self.battery_profile_combo.addItem(none_label, "")
+            for name in profile_names:
+                self.ac_profile_combo.addItem(name, name)
+                self.battery_profile_combo.addItem(name, name)
 
             ac_profile = self.settings.get("ac_profile", "")
             battery_profile = self.settings.get("battery_profile", "")
 
-            ac_idx = self.ac_profile_combo.findText(ac_profile) if ac_profile else 0
+            ac_idx = self.ac_profile_combo.findData(ac_profile) if ac_profile else 0
             if ac_idx < 0:
                 ac_idx = 0
             self.ac_profile_combo.setCurrentIndex(ac_idx)
 
-            battery_idx = self.battery_profile_combo.findText(battery_profile) if battery_profile else 0
+            battery_idx = self.battery_profile_combo.findData(battery_profile) if battery_profile else 0
             if battery_idx < 0:
                 battery_idx = 0
             self.battery_profile_combo.setCurrentIndex(battery_idx)
@@ -1568,20 +1926,27 @@ class Main(QtWidgets.QWidget):
             del battery_blocker
 
     def on_ac_profile_changed(self, text):
-        value = "" if text == "(none)" else text
+        value = self.ac_profile_combo.currentData() or ""
         if self.settings.get("ac_profile") == value:
             return
         self.settings["ac_profile"] = value
         self.save_settings()
-        self.set_status(f"AC profile set to: {text}")
+        self.set_status(
+            self.tr("status.ac_profile_set", profile=self.ac_profile_combo.currentText())
+        )
 
     def on_battery_profile_changed(self, text):
-        value = "" if text == "(none)" else text
+        value = self.battery_profile_combo.currentData() or ""
         if self.settings.get("battery_profile") == value:
             return
         self.settings["battery_profile"] = value
         self.save_settings()
-        self.set_status(f"Battery profile set to: {text}")
+        self.set_status(
+            self.tr(
+                "status.battery_profile_set",
+                profile=self.battery_profile_combo.currentText(),
+            )
+        )
 
     def set_status(self, t, level="info"):
         self.log(t, level=level)
@@ -1592,12 +1957,14 @@ class Main(QtWidgets.QWidget):
     def detect_device(self):
         rc, out, err = self.run_cli(["query", "--devices"])
         if rc == 0:
-            msg = (out or "").strip() or "Device detected."
+            self.hardware_detected = True
+            msg = (out or "").strip() or self.tr("status.device_detected")
             self.hardware_label.setText(msg)
             self.set_status(msg)
             self.sync_initial_state()
         else:
-            self.hardware_label.setText("Hardware: unknown")
+            self.hardware_detected = False
+            self.hardware_label.setText(self.tr("hero.hardware_unknown"))
             self.set_status(format_cli_error(rc, out, err))
 
     def sync_initial_state(self):
@@ -2121,6 +2488,7 @@ class Main(QtWidgets.QWidget):
         comboboxes = [
             self.mode, self.static_color, self.color, self.direction,
             self.profile_combo, self.ac_profile_combo, self.battery_profile_combo,
+            self.language_combo,
         ]
         for combo in comboboxes:
             view = combo.view()
@@ -2154,12 +2522,14 @@ class Main(QtWidgets.QWidget):
         ]
         try:
             mode_value = sanitize_choice(data.get("mode"), EFFECTS, "static")
-            self.mode.setCurrentText(mode_value)
+            if not set_combo_by_data(self.mode, mode_value):
+                set_combo_by_data(self.mode, "static")
 
             static_value = sanitize_choice(
                 data.get("static_color"), COLORS, self.last_static_color
             )
-            self.static_color.setCurrentText(static_value)
+            if not set_combo_by_data(self.static_color, static_value):
+                set_combo_by_data(self.static_color, self.last_static_color)
             self.last_static_color = static_value
 
             self.speed.setValue(clamp_int(data.get("speed"), 0, 10, self.speed.value()))
@@ -2167,17 +2537,17 @@ class Main(QtWidgets.QWidget):
             color_value = data.get("color") or "none"
             if color_value != "none" and color_value not in COLORS:
                 color_value = "none"
-            self.color.setCurrentText(color_value)
+            set_combo_by_data(self.color, color_value)
 
             reactive_value = bool(data.get("reactive"))
             self.reactive.setChecked(reactive_value)
 
             direction_value = sanitize_choice(
-                data.get("direction"), DIRECTIONS, self.direction.currentText()
+                data.get("direction"), DIRECTIONS, (self.direction.currentData() or "none")
             )
             if reactive_value:
                 direction_value = "none"
-            self.direction.setCurrentText(direction_value)
+            set_combo_by_data(self.direction, direction_value)
         finally:
             del blockers
 
@@ -2187,7 +2557,11 @@ class Main(QtWidgets.QWidget):
     def update_profile_save_state(self):
         if not hasattr(self, "btn_profile_save"):
             return
-        label = "Save *" if self._profile_dirty else "Save"
+        label = (
+            self.tr("buttons.save_dirty")
+            if self._profile_dirty
+            else self.tr("buttons.save")
+        )
         self.btn_profile_save.setText(label)
         if hasattr(self, "apply_button"):
             self.apply_button.setEnabled(self._profile_dirty)
@@ -2211,13 +2585,17 @@ class Main(QtWidgets.QWidget):
         if not self._profile_dirty:
             return True
         message = QtWidgets.QMessageBox(self)
-        message.setWindowTitle("Unsaved changes")
+        message.setWindowTitle(self.tr("dialogs.profile.unsaved_title"))
         message.setIcon(QtWidgets.QMessageBox.Warning)
         message.setText(
-            f"Save changes to profile '{self.active_profile_name}' before switching to '{target_name}'?"
+            self.tr(
+                "dialogs.profile.unsaved_message",
+                active=self.active_profile_name,
+                target=target_name,
+            )
         )
         message.setInformativeText(
-            "Preview changes are not saved unless you click Save."
+            self.tr("dialogs.profile.unsaved_detail")
         )
         message.setStandardButtons(
             QtWidgets.QMessageBox.Save
@@ -2228,7 +2606,9 @@ class Main(QtWidgets.QWidget):
         choice = message.exec()
         if choice == QtWidgets.QMessageBox.Save:
             self.persist_profile()
-            self.set_status(f"Profile '{self.active_profile_name}' saved.")
+            self.set_status(
+                self.tr("status.profile_saved", name=self.active_profile_name)
+            )
             return True
         if choice == QtWidgets.QMessageBox.Discard:
             return True
@@ -2259,17 +2639,17 @@ class Main(QtWidgets.QWidget):
         return True
 
     def capture_profile_state(self):
-        mode_value = sanitize_choice(self.mode.currentText(), EFFECTS, "static")
+        mode_value = sanitize_choice(self.mode.currentData(), EFFECTS, "static")
         static_value = sanitize_choice(
-            self.static_color.currentText(), COLORS, self.last_static_color
+            self.static_color.currentData(), COLORS, self.last_static_color
         )
         self.last_static_color = static_value
 
-        color_value = self.color.currentText() or "none"
+        color_value = self.color.currentData() or "none"
         if color_value != "none" and color_value not in COLORS:
             color_value = "none"
 
-        direction_value = self.direction.currentText()
+        direction_value = self.direction.currentData()
         if direction_value not in DIRECTIONS:
             direction_value = "none"
 
@@ -2304,7 +2684,10 @@ class Main(QtWidgets.QWidget):
             write_profile_store(self.profile_store)
             self.watch_profile_paths()
         except OSError as exc:
-            self.set_status(f"Failed to save profile: {exc}", level="error")
+            self.set_status(
+                self.tr("status.profile_save_failed", error=str(exc)),
+                level="error",
+            )
         finally:
             self._ignore_profile_events = False
 
@@ -2339,13 +2722,17 @@ class Main(QtWidgets.QWidget):
             return None
         name = text.strip()
         if not name:
-            QtWidgets.QMessageBox.warning(self, "Invalid name", "Profile name cannot be empty.")
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.tr("dialogs.profile.invalid_title"),
+                self.tr("dialogs.profile.invalid_message"),
+            )
             return None
         return name
 
     def on_profile_save_clicked(self):
         self.persist_profile()
-        self.set_status(f"Profile '{self.active_profile_name}' saved.")
+        self.set_status(self.tr("status.profile_saved", name=self.active_profile_name))
 
     def on_apply_clicked(self):
         self.apply_timer.stop()
@@ -2353,15 +2740,20 @@ class Main(QtWidgets.QWidget):
         self.persist_profile()
         if not self.is_off:
             self.apply_current_mode()
-        self.set_status(f"Profile '{self.active_profile_name}' updated.")
+        self.set_status(self.tr("status.profile_updated", name=self.active_profile_name))
 
     def on_profile_new_clicked(self):
-        name = self.prompt_profile_name("New profile", "Profile name:")
+        name = self.prompt_profile_name(
+            self.tr("dialogs.profile.new_title"),
+            self.tr("dialogs.profile.name_label"),
+        )
         if not name:
             return
         if name in self.profile_store["profiles"]:
             QtWidgets.QMessageBox.warning(
-                self, "Name in use", "A profile with that name already exists."
+                self,
+                self.tr("dialogs.profile.name_in_use_title"),
+                self.tr("dialogs.profile.name_in_use_message"),
             )
             return
         self.profile_store["profiles"][name] = dict(DEFAULT_PROFILE_STATE)
@@ -2371,17 +2763,21 @@ class Main(QtWidgets.QWidget):
         self.save_profile_store()
         self.refresh_profile_combo()
         self.load_profile_into_controls(self.profile_data)
-        self.set_status(f"New profile '{name}' created.")
+        self.set_status(self.tr("status.profile_created", name=name))
 
     def on_profile_save_as_clicked(self):
-        name = self.prompt_profile_name("Save profile", "Profile name:", self.active_profile_name)
+        name = self.prompt_profile_name(
+            self.tr("dialogs.profile.save_title"),
+            self.tr("dialogs.profile.name_label"),
+            self.active_profile_name,
+        )
         if not name:
             return
         if name in self.profile_store["profiles"] and name != self.active_profile_name:
             reply = QtWidgets.QMessageBox.question(
                 self,
-                "Overwrite profile",
-                f"Profile '{name}' already exists. Overwrite?",
+                self.tr("dialogs.profile.overwrite_title"),
+                self.tr("dialogs.profile.overwrite_message", name=name),
             )
             if reply != QtWidgets.QMessageBox.Yes:
                 return
@@ -2391,17 +2787,21 @@ class Main(QtWidgets.QWidget):
         self.save_profile_store()
         self.refresh_profile_combo()
         self.set_profile_dirty(False)
-        self.set_status(f"Profile '{name}' saved.")
+        self.set_status(self.tr("status.profile_saved", name=name))
 
     def on_profile_rename_clicked(self):
         new_name = self.prompt_profile_name(
-            "Rename profile", "New name:", self.active_profile_name
+            self.tr("dialogs.profile.rename_title"),
+            self.tr("dialogs.profile.rename_label"),
+            self.active_profile_name,
         )
         if not new_name or new_name == self.active_profile_name:
             return
         if new_name in self.profile_store["profiles"]:
             QtWidgets.QMessageBox.warning(
-                self, "Name in use", "Another profile already has that name."
+                self,
+                self.tr("dialogs.profile.name_in_use_title"),
+                self.tr("dialogs.profile.rename_in_use_message"),
             )
             return
         self.profile_store["profiles"][new_name] = self.profile_store["profiles"].pop(
@@ -2412,18 +2812,20 @@ class Main(QtWidgets.QWidget):
         self.profile_data = dict(self.profile_store["profiles"][new_name])
         self.save_profile_store()
         self.refresh_profile_combo()
-        self.set_status(f"Profile renamed to '{new_name}'.")
+        self.set_status(self.tr("status.profile_renamed", name=new_name))
 
     def on_profile_delete_clicked(self):
         if len(self.profile_store["profiles"]) <= 1:
             QtWidgets.QMessageBox.warning(
-                self, "Cannot delete", "At least one profile must remain."
+                self,
+                self.tr("dialogs.profile.cannot_delete_title"),
+                self.tr("dialogs.profile.cannot_delete_message"),
             )
             return
         reply = QtWidgets.QMessageBox.question(
             self,
-            "Delete profile",
-            f"Delete profile '{self.active_profile_name}'?",
+            self.tr("dialogs.profile.delete_title"),
+            self.tr("dialogs.profile.delete_message", name=self.active_profile_name),
         )
         if reply != QtWidgets.QMessageBox.Yes:
             return
@@ -2434,13 +2836,15 @@ class Main(QtWidgets.QWidget):
         self.save_profile_store()
         self.refresh_profile_combo()
         self.load_profile_into_controls(self.profile_data)
-        self.set_status(f"Profile '{self.active_profile_name}' is now active.")
+        self.set_status(
+            self.tr("status.profile_active", name=self.active_profile_name)
+        )
         if not self.is_off:
             self.apply_current_mode()
 
     def switch_active_profile(self, name, triggered_by_user=False):
         if name not in self.profile_store["profiles"]:
-            self.set_status(f"Profile '{name}' not found.", level="error")
+            self.set_status(self.tr("status.profile_not_found", name=name), level="error")
             self.refresh_profile_combo()
             return False
         if triggered_by_user and not self.confirm_profile_switch(name):
@@ -2452,7 +2856,7 @@ class Main(QtWidgets.QWidget):
         self.save_profile_store()
         self.refresh_profile_combo()
         self.load_profile_into_controls(self.profile_data)
-        self.set_status(f"Profile '{name}' loaded.")
+        self.set_status(self.tr("status.profile_loaded", name=name))
         if triggered_by_user and not self.is_off:
             self.apply_current_mode()
         return True
@@ -2460,7 +2864,9 @@ class Main(QtWidgets.QWidget):
     def refresh_autostart_flag(self, detail_text=None):
         state = is_autostart_enabled()
         self.autostart_enabled = state
-        status_label = "Enabled" if state else "Disabled"
+        status_label = (
+            self.tr("status.enabled") if state else self.tr("status.disabled")
+        )
         if hasattr(self, "autostart_status_label"):
             if detail_text:
                 self.autostart_status_label.setText(detail_text)
@@ -2485,15 +2891,17 @@ class Main(QtWidgets.QWidget):
                 remove_autostart_entry()
                 self.settings["start_in_tray"] = False
                 self.save_settings()
-                self.set_status("Autostart entry removed.")
+                self.set_status(self.tr("status.autostart_removed"))
             else:
                 ensure_restore_script_executable()
                 create_autostart_entry()
                 self.settings["start_in_tray"] = True
                 self.save_settings()
-                self.set_status(f"Autostart entry created at {AUTOSTART_ENTRY}.")
+                self.set_status(
+                    self.tr("status.autostart_created", path=AUTOSTART_ENTRY)
+                )
         except OSError as exc:
-            error = f"Autostart error: {exc}"
+            error = self.tr("status.autostart_error", error=str(exc))
             self.set_status(error, level="error")
             blocker = QtCore.QSignalBlocker(self.autostart_flag)
             try:
@@ -2520,12 +2928,16 @@ class Main(QtWidgets.QWidget):
             blocker = QtCore.QSignalBlocker(self.resume_flag)
             try:
                 self.resume_flag.setChecked(status_enabled)
-                self.resume_flag.setText("Enabled" if status_enabled else "Disabled")
+                self.resume_flag.setText(
+                    self.tr("status.enabled")
+                    if status_enabled
+                    else self.tr("status.disabled")
+                )
                 disabled = status_text == "systemctl not available"
                 self.resume_flag.setEnabled(not disabled)
                 if disabled:
                     self.resume_flag.setToolTip(
-                        "systemctl non disponibile: installa systemd o abilita manualmente."
+                        self.tr("status.systemctl_unavailable")
                     )
                 else:
                     self.resume_flag.setToolTip("")
@@ -2575,12 +2987,16 @@ class Main(QtWidgets.QWidget):
             blocker = QtCore.QSignalBlocker(self.power_monitor_flag)
             try:
                 self.power_monitor_flag.setChecked(status_enabled)
-                self.power_monitor_flag.setText("Enabled" if status_enabled else "Disabled")
+                self.power_monitor_flag.setText(
+                    self.tr("status.enabled")
+                    if status_enabled
+                    else self.tr("status.disabled")
+                )
                 disabled = status_text == "systemctl not available"
                 self.power_monitor_flag.setEnabled(not disabled)
                 if disabled:
                     self.power_monitor_flag.setToolTip(
-                        "systemctl non disponibile: installa systemd per usare il monitor."
+                        self.tr("status.systemctl_unavailable_monitor")
                     )
                 else:
                     self.power_monitor_flag.setToolTip("")
@@ -2623,7 +3039,11 @@ class Main(QtWidgets.QWidget):
         if brightness <= 0:
             return
         self.set_status(
-            f"Restoring saved profile '{self.active_profile_name}' from {PROFILE_PATH}."
+            self.tr(
+                "status.restoring_profile",
+                name=self.active_profile_name,
+                path=PROFILE_PATH,
+            )
         )
         self.is_off = False
         self.apply_current_mode()
@@ -2663,9 +3083,12 @@ class Main(QtWidgets.QWidget):
         self.watch_profile_paths()
         try:
             self.reload_profile_store_from_disk(announce=True)
-            self.set_status("Profiles reloaded from disk.")
+            self.set_status(self.tr("status.profiles_reloaded"))
         except (OSError, json.JSONDecodeError) as exc:
-            self.set_status(f"Failed to reload profiles: {exc}", level="error")
+            self.set_status(
+                self.tr("status.profiles_reload_failed", error=str(exc)),
+                level="error",
+            )
 
     def on_profile_directory_changed(self, path):
         if path != CONFIG_DIR:
@@ -2677,23 +3100,26 @@ class Main(QtWidgets.QWidget):
         if os.path.isfile(PROFILE_PATH):
             try:
                 self.reload_profile_store_from_disk(announce=True)
-                self.set_status("Profiles updated after directory change.")
+                self.set_status(self.tr("status.profiles_updated"))
             except (OSError, json.JSONDecodeError) as exc:
-                self.set_status(f"Failed to reload profiles: {exc}", level="error")
+                self.set_status(
+                    self.tr("status.profiles_reload_failed", error=str(exc)),
+                    level="error",
+                )
 
     def update_panels(self):
-        is_static = (self.mode.currentText() == "static")
+        is_static = (self.mode.currentData() == "static")
         self.static_label.setVisible(is_static)
         self.static_color.setVisible(is_static)
         self.effect_panel.setVisible(not is_static)
         self.direction.setEnabled(not self.reactive.isChecked())
         if self.reactive.isChecked():
-            self.direction.setCurrentText("none")
+            set_combo_by_data(self.direction, "none")
 
     def update_power_button(self):
         if not hasattr(self, "btn_power"):
             return
-        label = "Turn on" if self.is_off else "Turn off"
+        label = self.tr("buttons.turn_on") if self.is_off else self.tr("buttons.turn_off")
         self.btn_power.setText(label)
         self.btn_power.setProperty("powerState", "off" if self.is_off else "on")
         self.btn_power.style().unpolish(self.btn_power)
@@ -2702,7 +3128,7 @@ class Main(QtWidgets.QWidget):
     def on_reactive_toggled(self, checked):
         self.direction.setEnabled(not checked)
         if checked:
-            self.direction.setCurrentText("none")
+            set_combo_by_data(self.direction, "none")
 
     def on_mode_changed(self):
         self.update_panels()
@@ -2737,7 +3163,7 @@ class Main(QtWidgets.QWidget):
         rc, out, err = self.run_cli(["off"])
         self.is_off = True
         if rc == 0:
-            self.set_status("Backlight off")
+            self.set_status(self.tr("status.backlight_off"))
             self.update_power_button()
         else:
             self.set_status(format_cli_error(rc, out, err))
@@ -2765,7 +3191,7 @@ class Main(QtWidgets.QWidget):
             log_stderr=False,
         )
         if rc == 0:
-            self.set_status(f"Brightness set to {v}.")
+            self.set_status(self.tr("status.brightness_set", value=v))
             if self._pending_effect_after_brightness:
                 self._pending_effect_after_brightness = False
                 self.apply_current_mode()
@@ -2779,30 +3205,46 @@ class Main(QtWidgets.QWidget):
 
     def apply_static(self):
         v = int(self.b_spin.value())
-        c = self.static_color.currentText()
-        self.last_static_color = c
-        rc, out, err = self.hard_reset_then(["monocolor", "-b", str(v), "--name", c])
+        color_value = self.static_color.currentData() or self.static_color.currentText()
+        display_color = self.static_color.currentText()
+        self.last_static_color = color_value
+        rc, out, err = self.hard_reset_then(
+            ["monocolor", "-b", str(v), "--name", color_value]
+        )
         if rc == 0:
-            self.set_status(f"Static applied: brightness {v}, color {c}")
+            self.set_status(
+                self.tr(
+                    "status.static_applied",
+                    brightness=v,
+                    color=display_color,
+                )
+            )
         else:
-            self.set_status(f"Error ({rc}): {err or out or 'unknown'}")
+            self.set_status(
+                self.tr(
+                    "status.error_generic",
+                    code=rc,
+                    message=(err or out or self.tr("status.unknown_error")),
+                ),
+                level="error",
+            )
 
     def build_effect_args(self):
         v = int(self.b_spin.value())
-        eff = self.mode.currentText()
+        eff = self.mode.currentData() or "static"
         args = ["effect", "-b", str(v)]
 
         if self.speed.value() != 5:
             args += ["-s", str(self.speed.value())]
 
-        col = self.color.currentText()
+        col = self.color.currentData() or "none"
         if col != "none":
             args += ["-c", col]
 
         if self.reactive.isChecked():
             args.append("-r")
         else:
-            d = self.direction.currentText()
+            d = self.direction.currentData() or "none"
             if d != "none":
                 args += ["-d", d]
 
@@ -2816,14 +3258,23 @@ class Main(QtWidgets.QWidget):
         )
         if rc == 0:
             used_str = " ".join(used[1:])
-            self.set_status(f"Effect applied: {used_str}")
+            self.set_status(
+                self.tr("status.effect_applied", details=used_str)
+            )
         else:
-            self.set_status(f"Error ({rc}): {err or out or 'unknown'}")
+            self.set_status(
+                self.tr(
+                    "status.error_generic",
+                    code=rc,
+                    message=(err or out or self.tr("status.unknown_error")),
+                ),
+                level="error",
+            )
 
     def apply_current_mode(self):
         if self.is_off:
             return
-        if self.mode.currentText() == "static":
+        if self.mode.currentData() == "static":
             self.apply_static()
         else:
             self.apply_effect()
@@ -2834,10 +3285,23 @@ def main():
 
     lock_handle = acquire_single_instance_lock()
     if lock_handle is None:
+        language = detect_system_language()
+        translations = load_translations(language)
+        fallback = load_translations("en")
+
+        def tr(key, **kwargs):
+            text = translations.get(key) or fallback.get(key) or key
+            if kwargs:
+                try:
+                    return text.format(**kwargs)
+                except (KeyError, ValueError):
+                    return text
+            return text
+
         QtWidgets.QMessageBox.warning(
             None,
             APP_DISPLAY_NAME,
-            "Application is already running.\n\nCheck the system tray for the running instance.",
+            tr("dialogs.app_already_running"),
         )
         sys.exit(0)
 

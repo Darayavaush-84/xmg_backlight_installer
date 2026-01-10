@@ -1,11 +1,13 @@
 # Changelog
 
-## v1.7.0 – 2026-01-07
+## v1.7.0 – 2026-01-10
 ### GUI
 - Effect/color/brightness changes are now preview-only and revert when the window is closed and minimized unless saved.
 - Added an Apply button to save changes directly from the Effects & colors section.
 - You can save the new profile via the Save button in Quick profiles.
 - Unsaved changes are flagged on the Save button and prompt on profile switch.
+- Added a language selector (EN/IT/DE/ES/FR) with automatic system-language detection and English fallback.
+- Moved UI strings into translation files to support localized labels, dialogs, and notifications.
 
 ## v1.6.0 – 2026-01-06
 ### Installer

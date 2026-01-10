@@ -66,7 +66,7 @@ FILES_TO_DEPLOY = [
     "restore_profile.py",
     "power_state_monitor.py",
 ]
-DIRS_TO_DEPLOY: list[str] = []
+DIRS_TO_DEPLOY: list[str] = ["translations"]
 DRIVER_INSTALLED_THIS_RUN = False
 _INSTALLER_LOG_READY = False
 
