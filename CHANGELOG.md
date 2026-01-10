@@ -1,9 +1,16 @@
 # Changelog
 
+## v1.7.0 – 2026-01-07
+### GUI
+- Effect/color/brightness changes are now preview-only and revert when the window is closed and minimized unless saved.
+- Added an Apply button to save changes directly from the Effects & colors section.
+- You can save the new profile via the Save button in Quick profiles.
+- Unsaved changes are flagged on the Save button and prompt on profile switch.
+
 ## v1.6.0 – 2026-01-06
 ### Installer
 - Added a pre-install update check that detects newer GitHub releases and can download and run the updated installer.
-- Added automatic udev rule setup to grant non-root access to the keyboard device.
+- Added automatic udev rule setup to grant non-root access to the keyboard device (fixes "unknown hardware" in the GUI)
 
 ## v1.5.0 – 2026-01-05
 ### GUI

@@ -14,7 +14,7 @@ from collections import deque
 from PySide6 import QtCore, QtWidgets, QtGui
 
 APP_DISPLAY_NAME = "XMG Backlight Management"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 GITHUB_REPO_URL = "https://github.com/Darayavaush-84/xmg_backlight_installer"
 NOTIFICATION_TIMEOUT_MS = 1500
 ACTIVITY_LOG_MAX_LINES = 100
@@ -608,6 +608,7 @@ class Main(QtWidgets.QWidget):
         self._pending_effect_after_brightness = False
         self._ignore_profile_events = False
         self._updating_profile_combo = False
+        self._profile_dirty = False
         ensure_restore_script_executable()
         self.profile_store = load_profile_store()
         self.active_profile_name = self.profile_store["active"]
@@ -753,9 +754,16 @@ class Main(QtWidgets.QWidget):
         mode_layout.setContentsMargins(24, 24, 24, 24)
         mode_layout.setSpacing(18)
 
+        mode_header = QtWidgets.QHBoxLayout()
         mode_title = QtWidgets.QLabel("Effects & colors")
         mode_title.setObjectName("sectionTitle")
-        mode_layout.addWidget(mode_title)
+        mode_header.addWidget(mode_title)
+        mode_header.addStretch(1)
+        self.apply_button = QtWidgets.QPushButton("Apply")
+        self.apply_button.setObjectName("applyButton")
+        self.apply_button.setEnabled(False)
+        mode_header.addWidget(self.apply_button)
+        mode_layout.addLayout(mode_header)
 
         mode_caption = QtWidgets.QLabel("Pick static hues or animated scenes with direction and reactivity.")
         mode_caption.setWordWrap(True)
@@ -1048,6 +1056,7 @@ class Main(QtWidgets.QWidget):
         self.direction.currentIndexChanged.connect(self.schedule_apply)
         self.reactive.toggled.connect(self.on_reactive_toggled)
         self.reactive.toggled.connect(self.schedule_apply)
+        self.apply_button.clicked.connect(self.on_apply_clicked)
 
         self.profile_combo.currentTextChanged.connect(self.on_profile_combo_changed)
         self.btn_profile_new.clicked.connect(self.on_profile_new_clicked)
@@ -1385,7 +1394,9 @@ class Main(QtWidgets.QWidget):
             self.restore_profile_after_startup()
             self.notify(APP_DISPLAY_NAME, f"Profile '{name}' reapplied.")
             return
-        self.switch_active_profile(name, triggered_by_user=True)
+        if not self.switch_active_profile(name, triggered_by_user=True):
+            self.rebuild_tray_profiles_menu()
+            return
         self.rebuild_tray_profiles_menu()
         self.notify(APP_DISPLAY_NAME, f"Profile '{name}' applied.")
 
@@ -1412,7 +1423,15 @@ class Main(QtWidgets.QWidget):
             if self.isHidden():
                 self.show_window_from_tray()
             else:
+                reverted = self.revert_unsaved_preview(
+                    "Preview discarded after hiding the window."
+                )
                 self.hide()
+                if reverted:
+                    self.notify(
+                        APP_DISPLAY_NAME,
+                        "Unsaved preview discarded. Previous profile restored.",
+                    )
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1480,6 +1499,9 @@ class Main(QtWidgets.QWidget):
         self.log(f"Synced device state: {suffix}")
 
     def closeEvent(self, event):
+        reverted = self.revert_unsaved_preview(
+            "Preview discarded after closing the window."
+        )
         if self._quitting:
             return super().closeEvent(event)
         if (
@@ -1490,7 +1512,13 @@ class Main(QtWidgets.QWidget):
             event.ignore()
             self.hide()
             if not self._tray_close_hint_shown:
-                self.notify(APP_DISPLAY_NAME, "Still running in tray. Quit from tray menu.")
+                message = "Still running in tray. Quit from tray menu."
+                if reverted:
+                    message = (
+                        "Still running in tray. "
+                        "Unsaved preview discarded and previous profile restored."
+                    )
+                self.notify(APP_DISPLAY_NAME, message)
                 self._tray_close_hint_shown = True
             return
         return super().closeEvent(event)
@@ -1803,6 +1831,24 @@ class Main(QtWidgets.QWidget):
             color: #94a3b8;
             border: 2px solid #cbd5e1;
         }
+        QPushButton#applyButton {
+            padding: 8px 22px;
+            border-radius: 16px;
+            border: 2px solid #94a3b8;
+            background-color: #ffffff;
+            font-weight: 600;
+            color: #1f2933;
+        }
+        QPushButton#applyButton:enabled {
+            border: 2px solid #16a34a;
+            color: #ffffff;
+            background-color: #16a34a;
+        }
+        QPushButton#applyButton:disabled {
+            background-color: #f1f5f9;
+            color: #94a3b8;
+            border: 2px solid #cbd5e1;
+        }
         """
         dark = """
         #MainView {
@@ -2014,6 +2060,24 @@ class Main(QtWidgets.QWidget):
             color: #64748b;
             border: 2px solid #334155;
         }
+        QPushButton#applyButton {
+            padding: 8px 22px;
+            border-radius: 16px;
+            border: 2px solid #64748b;
+            background-color: #1e293b;
+            font-weight: 600;
+            color: #e2e8f0;
+        }
+        QPushButton#applyButton:enabled {
+            border: 2px solid #16a34a;
+            color: #ffffff;
+            background-color: #16a34a;
+        }
+        QPushButton#applyButton:disabled {
+            background-color: #1e293b;
+            color: #64748b;
+            border: 2px solid #334155;
+        }
         QMessageBox {
             background-color: #1e293b;
             color: #e2e8f0;
@@ -2118,6 +2182,81 @@ class Main(QtWidgets.QWidget):
             del blockers
 
         self.update_panels()
+        self.set_profile_dirty(False)
+
+    def update_profile_save_state(self):
+        if not hasattr(self, "btn_profile_save"):
+            return
+        label = "Save *" if self._profile_dirty else "Save"
+        self.btn_profile_save.setText(label)
+        if hasattr(self, "apply_button"):
+            self.apply_button.setEnabled(self._profile_dirty)
+
+    def set_profile_dirty(self, dirty):
+        dirty = bool(dirty)
+        if self._profile_dirty == dirty:
+            return
+        self._profile_dirty = dirty
+        self.update_profile_save_state()
+
+    def refresh_profile_dirty_state(self):
+        if not self.profile_data:
+            self.set_profile_dirty(False)
+            return
+        current = self.capture_profile_state()
+        self.set_profile_dirty(current != self.profile_data)
+
+    def confirm_profile_switch(self, target_name):
+        self.refresh_profile_dirty_state()
+        if not self._profile_dirty:
+            return True
+        message = QtWidgets.QMessageBox(self)
+        message.setWindowTitle("Unsaved changes")
+        message.setIcon(QtWidgets.QMessageBox.Warning)
+        message.setText(
+            f"Save changes to profile '{self.active_profile_name}' before switching to '{target_name}'?"
+        )
+        message.setInformativeText(
+            "Preview changes are not saved unless you click Save."
+        )
+        message.setStandardButtons(
+            QtWidgets.QMessageBox.Save
+            | QtWidgets.QMessageBox.Discard
+            | QtWidgets.QMessageBox.Cancel
+        )
+        message.setDefaultButton(QtWidgets.QMessageBox.Save)
+        choice = message.exec()
+        if choice == QtWidgets.QMessageBox.Save:
+            self.persist_profile()
+            self.set_status(f"Profile '{self.active_profile_name}' saved.")
+            return True
+        if choice == QtWidgets.QMessageBox.Discard:
+            return True
+        return False
+
+    def revert_unsaved_preview(self, reason=None):
+        self.refresh_profile_dirty_state()
+        if not self._profile_dirty:
+            return False
+        if not self.profile_data:
+            return False
+        self.apply_timer.stop()
+        self.brightness_timer.stop()
+        saved_state = dict(self.profile_data)
+        self.load_profile_into_controls(saved_state)
+        brightness = clamp_int(
+            saved_state.get("brightness"), 0, 50, self.last_brightness
+        )
+        if brightness <= 0:
+            self.is_off = True
+            self.run_cli(["off"], log_cmd=False, log_stdout=False, log_stderr=False)
+        else:
+            self.is_off = False
+            self.apply_current_mode()
+        self.update_power_button()
+        if reason:
+            self.set_status(reason)
+        return True
 
     def capture_profile_state(self):
         mode_value = sanitize_choice(self.mode.currentText(), EFFECTS, "static")
@@ -2152,6 +2291,7 @@ class Main(QtWidgets.QWidget):
         state = self.capture_profile_state()
         self.update_active_profile_state(state)
         self.save_profile_store()
+        self.set_profile_dirty(False)
 
     def update_active_profile_state(self, state):
         self.profile_store["profiles"][self.active_profile_name] = dict(state)
@@ -2207,6 +2347,14 @@ class Main(QtWidgets.QWidget):
         self.persist_profile()
         self.set_status(f"Profile '{self.active_profile_name}' saved.")
 
+    def on_apply_clicked(self):
+        self.apply_timer.stop()
+        self.brightness_timer.stop()
+        self.persist_profile()
+        if not self.is_off:
+            self.apply_current_mode()
+        self.set_status(f"Profile '{self.active_profile_name}' updated.")
+
     def on_profile_new_clicked(self):
         name = self.prompt_profile_name("New profile", "Profile name:")
         if not name:
@@ -2242,6 +2390,7 @@ class Main(QtWidgets.QWidget):
         self.update_active_profile_state(state)
         self.save_profile_store()
         self.refresh_profile_combo()
+        self.set_profile_dirty(False)
         self.set_status(f"Profile '{name}' saved.")
 
     def on_profile_rename_clicked(self):
@@ -2293,9 +2442,10 @@ class Main(QtWidgets.QWidget):
         if name not in self.profile_store["profiles"]:
             self.set_status(f"Profile '{name}' not found.", level="error")
             self.refresh_profile_combo()
-            return
-        previous_state = self.capture_profile_state()
-        self.profile_store["profiles"][self.active_profile_name] = previous_state
+            return False
+        if triggered_by_user and not self.confirm_profile_switch(name):
+            self.refresh_profile_combo()
+            return False
         self.active_profile_name = name
         self.profile_store["active"] = name
         self.profile_data = dict(self.profile_store["profiles"][name])
@@ -2305,6 +2455,7 @@ class Main(QtWidgets.QWidget):
         self.set_status(f"Profile '{name}' loaded.")
         if triggered_by_user and not self.is_off:
             self.apply_current_mode()
+        return True
 
     def refresh_autostart_flag(self, detail_text=None):
         state = is_autostart_enabled()
@@ -2555,8 +2706,7 @@ class Main(QtWidgets.QWidget):
 
     def on_mode_changed(self):
         self.update_panels()
-        if not self.is_off:
-            self.schedule_apply()
+        self.schedule_apply()
 
     def on_brightness_changed(self, v):
         if self._suppress:
@@ -2564,6 +2714,7 @@ class Main(QtWidgets.QWidget):
         v = int(v)
         was_off = self.is_off
         self.last_brightness = v
+        self.refresh_profile_dirty_state()
         if v <= 0:
             self.brightness_timer.stop()
             self.on_power_off()
@@ -2587,7 +2738,6 @@ class Main(QtWidgets.QWidget):
         self.is_off = True
         if rc == 0:
             self.set_status("Backlight off")
-            self.persist_profile()
             self.update_power_button()
         else:
             self.set_status(format_cli_error(rc, out, err))
@@ -2599,6 +2749,7 @@ class Main(QtWidgets.QWidget):
             self.on_power_off()
 
     def schedule_apply(self):
+        self.refresh_profile_dirty_state()
         if self.is_off:
             return
         self.apply_timer.start()
@@ -2615,7 +2766,6 @@ class Main(QtWidgets.QWidget):
         )
         if rc == 0:
             self.set_status(f"Brightness set to {v}.")
-            self.persist_profile()
             if self._pending_effect_after_brightness:
                 self._pending_effect_after_brightness = False
                 self.apply_current_mode()
@@ -2634,7 +2784,6 @@ class Main(QtWidgets.QWidget):
         rc, out, err = self.hard_reset_then(["monocolor", "-b", str(v), "--name", c])
         if rc == 0:
             self.set_status(f"Static applied: brightness {v}, color {c}")
-            self.persist_profile()
         else:
             self.set_status(f"Error ({rc}): {err or out or 'unknown'}")
 
@@ -2668,7 +2817,6 @@ class Main(QtWidgets.QWidget):
         if rc == 0:
             used_str = " ".join(used[1:])
             self.set_status(f"Effect applied: {used_str}")
-            self.persist_profile()
         else:
             self.set_status(f"Error ({rc}): {err or out or 'unknown'}")
 
