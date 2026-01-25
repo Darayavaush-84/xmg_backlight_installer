@@ -14,7 +14,7 @@ from collections import deque
 from PySide6 import QtCore, QtWidgets, QtGui
 
 APP_DISPLAY_NAME = "XMG Backlight Management"
-APP_VERSION = "1.7.0"
+APP_VERSION = "2.0.0"
 GITHUB_REPO_URL = "https://github.com/Darayavaush-84/xmg_backlight_installer"
 NOTIFICATION_TIMEOUT_MS = 1500
 ACTIVITY_LOG_MAX_LINES = 100
@@ -1705,7 +1705,8 @@ class Main(QtWidgets.QWidget):
                 except Exception:
                     pass
                 try:
-                    result = subprocess.run(["ite8291r3-ctl", "--version"], capture_output=True, text=True, timeout=5)
+                    tool_cmd = TOOL or "ite8291r3-ctl"
+                    result = subprocess.run([tool_cmd, "--version"], capture_output=True, text=True, timeout=5)
                     system_info.append(f"Driver: {result.stdout.strip() or result.stderr.strip()}")
                 except Exception:
                     system_info.append("Driver: not found")

@@ -19,7 +19,7 @@ Special thanks to **Barnabás Pőcze** and contributors for the `ite8291r3-ctl` 
 ## Requirements
 
 * Linux distribution with `systemd` user sessions (tested on Fedora; other distros may need tweaks).
-* Python 3.10+ with `pip`.
+* Python 3.10+ with `venv` (python3-venv on Debian/Ubuntu) and `pip`.
 * Root privileges to deploy files under `/usr/share`, `/usr/local/bin`, `/etc/xdg`, etc.
 * USB access to the keyboard controller (ensure `ite8291r3-ctl` works on your device).
 
@@ -34,6 +34,9 @@ Special thanks to **Barnabás Pőcze** and contributors for the `ite8291r3-ctl` 
    ```bash
    sudo python3 install.py
    ```
+   The installer creates a virtual environment under `/usr/local/lib/xmg-backlight-venv`
+   to avoid modifying the system Python. If you run the installer from a venv, it still
+   uses the system Python to avoid nested venvs.
 3. Launch **XMG Backlight Management** from your desktop menu, the GUI will automatically load in the systray, with double click you can open it and enable the automation toggles (resume + power monitor) if desired.
 
 ## Uninstallation
@@ -45,8 +48,8 @@ sudo python3 install.py --uninstall
 ```
 
 When run without additional flags, the installer will prompt you to choose:
-1. **Partial removal** - removes system files plus user services/autostart entries (keeps user profiles)
-2. **Full removal** - removes everything including pip packages and user profiles
+1. **Partial removal** - removes system files (launcher, driver wrapper, desktop entry, udev rule, installer log) plus user services/autostart entries; keeps user profiles and the venv
+2. **Full removal** - removes everything including the venv/pip packages and user profiles
 
 ### Command-line flags
 
@@ -56,7 +59,7 @@ For scripted/non-interactive uninstallation:
 # Remove system files only
 sudo python3 install.py --uninstall
 
-# Also remove pip packages (ite8291r3-ctl, PySide6, shiboken6)
+# Also remove the virtual environment (ite8291r3-ctl, PySide6, shiboken6)
 sudo python3 install.py --uninstall --purge
 
 # Also remove user profiles (~/.config/backlight-linux/)
@@ -66,13 +69,21 @@ sudo python3 install.py --uninstall --purge-user-data
 sudo python3 install.py --uninstall --purge --purge-user-data
 ```
 
+If the venv cannot be removed, the installer falls back to `pip uninstall` for those packages.
+Uninstall is best-effort; permission issues will be logged but won't abort.
+
 The installer performs these actions:
-* Installs `ite8291r3-ctl` and `PySide6` via `pip` only if missing.
+* Installs `ite8291r3-ctl` and `PySide6` into a dedicated virtual environment.
 * Copies the GUI scripts (`keyboard_backlight.py`, `restore_profile.py`, `power_state_monitor.py`) into `/usr/share/xmg-backlight`.
 * Creates a launcher wrapper at `/usr/local/bin/xmg-backlight` and a desktop entry under `/usr/share/applications`.
 * Creates a disabled system-wide autostart entry at `/etc/xdg/autostart/xmg-backlight-restore.desktop` (optional restore helper).
+* Installs a udev rule for detected device IDs at `/etc/udev/rules.d/99-ite8291.rules` (`0666`).
+  The udev rule is permissive for simplicity; for tighter security use a group-based rule or `TAG+="uaccess"`.
 * Probes for compatible ITE 8291 keyboards; if none are found you can abort safely and the just-installed driver will be removed automatically.
 * Resume restore and power monitoring are controlled from the GUI using systemd user services.
+
+Uninstall also removes the udev rule and `/var/log/xmg-backlight/installer.log`.
+The update check is optional, shows release notes, and never auto-downloads the installer.
 
 ## System tray and notifications
 
@@ -122,8 +133,8 @@ If the keyboard stays dark but manual restore works (`python3 /usr/share/xmg-bac
 
 ## Troubleshooting
 
-* **Permissions:** If `ite8291r3-ctl query --devices` fails with a permission error, add a udev rule for your USB device or adjust group permissions.
-* **Installer log:** The installer writes to `/var/log/xmg-backlight/installer.log`. GUI log exports include it when available.
+* **Permissions:** If `ite8291r3-ctl query --devices` fails with a permission error, verify `/etc/udev/rules.d/99-ite8291.rules`, then replug/reboot.
+* **Installer log:** The installer writes to `/var/log/xmg-backlight/installer.log` (removed on uninstall). GUI log exports include it when available.
 
 ## Development workflow
 

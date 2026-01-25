@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.0.0 – 2026-01-24
+### Installer
+- Added experimental support for Ubuntu
+- Update check is now notify-only: show a readable changelog, link to the repo, and prompt whether to continue. Auto-download/execution of the updated installer has been removed for safety.
+- Install dependencies into a dedicated virtual environment under /usr/local/lib/xmg-backlight-venv, avoiding nesting virtual environments when the installer runs inside a venv.
+- Add a driver wrapper at /usr/local/bin/ite8291r3-ctl that runs the venv CLI.
+- Detect legacy global ite8291r3-ctl/pyusb/PySide6 installs, list files, and prompt before removal.
+- Save installer metadata to /var/lib/xmg-backlight/installer-state.json for future upgrades/uninstalls.
+- Automatically attempt to install venv prerequisites on Ubuntu (python3-venv/python3-pip) and Fedora/RHEL-like (python3-pip) if missing.
+- Ensure consistent abort-by-default prompt when no compatible hardware is detected.
+- Harden the update extractor against symlinks and unsupported archive entries.
+- Uninstall is best-effort; file removal errors are logged and won't abort.
+
+### GUI
+- Log export now uses the resolved ite8291r3-ctl path when collecting driver version info.
+
 ## v1.7.0 – 2026-01-10
 ### GUI
 - Effect/color/brightness changes are now preview-only and revert when the window is closed and minimized unless saved.
