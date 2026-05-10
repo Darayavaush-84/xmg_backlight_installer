@@ -12,16 +12,28 @@ Special thanks to **Barnabás Pőcze** and contributors for the `ite8291r3-ctl` 
 
 | Path | Purpose |
 | --- | --- |
-| `source/` | Upstream scripts (GUI, restore helper, power monitor). |
+| `installer_lib/` | Installer helper modules (version parsing, udev helpers). |
+| `source/xmg_backlight/` | Application package (GUI, restore helper, power monitor, translations, shared storage/CLI/service helpers). |
+| `source/ite8291r3_ctl/` | Vendored upstream driver source for reference and local packaging. |
+| `tests/` | Unit tests for installer/application helper behavior. |
 | `install.py` | Top-level installer script to run with sudo. |
 | `.gitignore` | Local development exclusions (bytecode, build artifacts, IDE files, etc.). |
 
 ## Requirements
 
-* Linux distribution with `systemd` user sessions (tested on Fedora; other distros may need tweaks).
+* Linux distribution with `systemd` user sessions.
 * Python 3.10+ with `venv` (python3-venv on Debian/Ubuntu) and `pip`.
 * Root privileges to deploy files under `/usr/share`, `/usr/local/bin`, `/etc/xdg`, etc.
 * USB access to the keyboard controller (ensure `ite8291r3-ctl` works on your device).
+
+## Distribution support
+
+| Distribution family | Status | Notes |
+| --- | --- | --- |
+| Fedora/RHEL-like | Tested | The installer can attempt to install `python3-pip` via `dnf`/`yum` when needed. |
+| Arch-like / CachyOS | Tested | The driver and udev setup have been verified with `048d:6004` device detection. |
+| Debian/Ubuntu-like | Experimental | The installer can attempt to install `python3-venv`, `python3-pip`, and `libusb-1.0-0` via `apt-get` when needed. |
+| Other systemd-based distributions | Community | Expected to work if Python, pip/venv, libusb, udev, and systemd user sessions are available. |
 
 ## Installation
 
@@ -74,7 +86,7 @@ Uninstall is best-effort; permission issues will be logged but won't abort.
 
 The installer performs these actions:
 * Installs `ite8291r3-ctl` and `PySide6` into a dedicated virtual environment.
-* Copies the GUI scripts (`keyboard_backlight.py`, `restore_profile.py`, `power_state_monitor.py`) into `/usr/share/xmg-backlight`.
+* Copies the `xmg_backlight` application package into `/usr/share/xmg-backlight`.
 * Creates a launcher wrapper at `/usr/local/bin/xmg-backlight` and a desktop entry under `/usr/share/applications`.
 * Creates a disabled system-wide autostart entry at `/etc/xdg/autostart/xmg-backlight-restore.desktop` (optional restore helper).
 * Installs a udev rule for detected device IDs at `/etc/udev/rules.d/99-ite8291.rules` (`0666`).
@@ -129,7 +141,7 @@ Enable **Dark Mode** in the Smart automations section for a dark UI theme. The d
    journalctl --user -u keyboard-backlight-resume.service -b
    ```
 
-If the keyboard stays dark but manual restore works (`python3 /usr/share/xmg-backlight/restore_profile.py`), inspect the log above to understand which phase failed.
+If the keyboard stays dark but manual restore works (`cd /usr/share/xmg-backlight && python3 -m xmg_backlight.restore_profile`), inspect the log above to understand which phase failed.
 
 ## Troubleshooting
 
@@ -138,10 +150,10 @@ If the keyboard stays dark but manual restore works (`python3 /usr/share/xmg-bac
 
 ## Development workflow
 
-* Use the files under `source/` as the canonical payload: modify them there, then re-run the installer to copy updates into `/usr/share/xmg-backlight`.
+* Use the files under `source/xmg_backlight/` as the canonical application payload: modify them there, then re-run the installer to copy updates into `/usr/share/xmg-backlight`.
 * Keep the installer idempotent; re-running it should refresh deployed files without breaking existing installs.
 * When adding integrations (systemd user services, autostart), place the generator logic in `install.py` so deployments remain reproducible.
-* Run `python3 -m pytest` (if you add tests) or manual smoke tests: start the GUI, toggle automation, run suspend/resume, and inspect `journalctl --user -u keyboard-backlight-resume.service -b`.
+* Run `python3 -m unittest discover -s tests` plus manual smoke tests: start the GUI, toggle automation, run suspend/resume, and inspect `journalctl --user -u keyboard-backlight-resume.service -b`.
 
 ## Credits
 

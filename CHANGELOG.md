@@ -1,8 +1,18 @@
 # Changelog
 
-## v2.0.1 – 2026-05-10
+## v2.1.0 – 2026-05-11
 ### Installer
 - Fixed udev device ID parsing for `ite8291r3-ctl query --devices` output like `048d:6004 ...`, restoring automatic udev rule setup.
+- Updated installer deployment and launchers to run the application package via Python modules instead of top-level scripts.
+
+### Maintenance
+- Split installer version parsing and udev helpers into small `installer_lib` modules to make future changes easier to test and review.
+- Reorganized the GUI, restore helper, power monitor, translations, and shared helpers into a proper `xmg_backlight` application package.
+- Split the GUI window behavior into focused mixins for language, activity log, tray, device sync, theme, profiles, automation, and effects handling.
+- Added `unittest` coverage for version parsing, udev parsing/rule generation, and restore command construction.
+
+### Documentation
+- Added a distribution support matrix covering Fedora/RHEL-like, Arch-like/CachyOS, Debian/Ubuntu-like, and other systemd-based distributions.
 
 ## v2.0.0 – 2026-01-24
 ### Installer

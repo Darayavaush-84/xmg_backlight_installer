@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""XMG Backlight Management installer (tested on Fedora).
+"""XMG Backlight Management installer.
 
 This script installs the ite8291r3-ctl CLI via pip in a dedicated virtual
 environment, deploys the GUI ("XMG Backlight Management") system-wide and
-registers a desktop entry visible to all users. Run it on a Fedora system
-(where it has been tested) with sudo/root privileges.
+registers a desktop entry visible to all users. Run it with sudo/root
+privileges.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ import argparse
 import filecmp
 import json
 import os
-import re
 import shutil
 import shlex
 import signal
@@ -25,6 +24,17 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Iterable, Tuple
+
+from installer_lib.udev import (
+    existing_rule_contains_device,
+    format_udev_rule,
+    parse_device_id_lines,
+)
+from installer_lib.versioning import (
+    extract_app_version_from_text,
+    is_newer_version,
+    parse_version,
+)
 
 APP_NAME = "XMG Backlight Management"
 DRIVER_PACKAGE = "ite8291r3-ctl"
@@ -38,7 +48,8 @@ LEGACY_GLOBAL_PACKAGES = [
     "shiboken6",
 ]
 LEGACY_CLEANUP_VERSION = "1.8.0"
-GUI_SCRIPT_NAME = "keyboard_backlight.py"
+GUI_SCRIPT_NAME = "xmg_backlight/app.py"
+APP_VERSION_FILE = "xmg_backlight/constants.py"
 GUI_CLOSE_TIMEOUT_SEC = 4.0
 # Avoid nesting venvs if the installer is run inside one.
 if sys.prefix != sys.base_prefix:
@@ -63,8 +74,8 @@ SYSTEMD_SERVICE_DROPINS = [
 ]
 DROPIN_FILENAME = "xmg-backlight-restore.conf"
 FEDORA_NOTICE = (
-    "This installer has been tested on Fedora. Other distributions have not "
-    "been validated and may require manual adjustments."
+    "Fedora/RHEL-like support is tested. Please report any distro-specific "
+    "issues at https://github.com/Darayavaush-84/xmg_backlight_installer."
 )
 GITHUB_REPO = "Darayavaush-84/xmg_backlight_installer"
 GITHUB_LATEST_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -83,12 +94,13 @@ UDEV_RULE_PATH = Path("/etc/udev/rules.d/99-ite8291.rules")
 
 BASE_DIR = Path(__file__).resolve().parent
 SOURCE_DIR = (BASE_DIR / "source").resolve()
-FILES_TO_DEPLOY = [
+FILES_TO_DEPLOY: list[str] = []
+DIRS_TO_DEPLOY: list[str] = ["xmg_backlight"]
+LEGACY_PAYLOAD_FILES = [
     "keyboard_backlight.py",
     "restore_profile.py",
     "power_state_monitor.py",
 ]
-DIRS_TO_DEPLOY: list[str] = ["translations"]
 DRIVER_INSTALLED_THIS_RUN = False
 _INSTALLER_LOG_READY = False
 
@@ -466,59 +478,25 @@ def ensure_venv() -> None:
 
 
 def read_local_app_version() -> str | None:
-    version_path = SOURCE_DIR / GUI_SCRIPT_NAME
+    version_path = SOURCE_DIR / APP_VERSION_FILE
     try:
         content = version_path.read_text(encoding="utf-8")
     except OSError:
         return None
-    for line in content.splitlines():
-        if "APP_VERSION" not in line:
-            continue
-        match = re.search(r"APP_VERSION\s*=\s*[\"']([^\"']+)[\"']", line)
-        if match:
-            return match.group(1).strip()
-    return None
+    return extract_app_version_from_text(content)
 
 
 def read_installed_app_version() -> str | None:
-    version_path = SHARE_DIR / GUI_SCRIPT_NAME
-    try:
-        content = version_path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    for line in content.splitlines():
-        if "APP_VERSION" not in line:
+    for relative in (APP_VERSION_FILE, "keyboard_backlight.py"):
+        version_path = SHARE_DIR / relative
+        try:
+            content = version_path.read_text(encoding="utf-8")
+        except OSError:
             continue
-        match = re.search(r"APP_VERSION\s*=\s*[\"']([^\"']+)[\"']", line)
-        if match:
-            return match.group(1).strip()
+        version = extract_app_version_from_text(content)
+        if version:
+            return version
     return None
-
-
-def parse_version(value: str) -> tuple[int, ...]:
-    if not value:
-        return tuple()
-    trimmed = value.strip()
-    if trimmed.lower().startswith("v"):
-        trimmed = trimmed[1:]
-    trimmed = trimmed.split("+", 1)[0].split("-", 1)[0]
-    parts = []
-    for part in trimmed.split("."):
-        match = re.match(r"([0-9]+)", part)
-        if match:
-            parts.append(int(match.group(1)))
-    return tuple(parts)
-
-
-def is_newer_version(candidate: str, current: str) -> bool:
-    candidate_parts = parse_version(candidate)
-    current_parts = parse_version(current)
-    if not candidate_parts or not current_parts:
-        return False
-    max_len = max(len(candidate_parts), len(current_parts))
-    candidate_parts += (0,) * (max_len - len(candidate_parts))
-    current_parts += (0,) * (max_len - len(current_parts))
-    return candidate_parts > current_parts
 
 
 def fetch_latest_release() -> tuple[str, str, str, str]:
@@ -651,7 +629,10 @@ def iter_process_args() -> Iterable[Tuple[int, list[str]]]:
 def find_gui_pids() -> list[int]:
     pids: list[int] = []
     for pid, args in iter_process_args():
-        if any(Path(arg).name == GUI_SCRIPT_NAME for arg in args):
+        if any(arg == "xmg_backlight.app" for arg in args):
+            pids.append(pid)
+            continue
+        if any(Path(arg).name == Path(GUI_SCRIPT_NAME).name for arg in args):
             pids.append(pid)
     return pids
 
@@ -760,59 +741,16 @@ def detect_driver() -> None:
 
 
 def extract_device_ids(lines: list[str]) -> list[tuple[str, str]]:
-    ids: list[tuple[str, str]] = []
-    unmatched: list[str] = []
-    vendor_patterns = [
-        r"\bidvendor\s*[:=]?\s*(?:0x)?([0-9a-fA-F]{4})\b",
-        r"\bvendor\s*[:=]?\s*(?:0x)?([0-9a-fA-F]{4})\b",
-        r"\bmanufacturer\s*[:=]?\s*(?:0x)?([0-9a-fA-F]{4})\b",
-    ]
-    product_patterns = [
-        r"\bidproduct\s*[:=]?\s*(?:0x)?([0-9a-fA-F]{4})\b",
-        r"\bproduct\s*[:=]?\s*(?:0x)?([0-9a-fA-F]{4})\b",
-    ]
-    pair_patterns = [
-        r"\bid\s+(?:0x)?([0-9a-fA-F]{4})\s*:\s*(?:0x)?([0-9a-fA-F]{4})\b",
-        r"\b(?:0x)?([0-9a-fA-F]{4})\s*:\s*(?:0x)?([0-9a-fA-F]{4})\b",
-    ]
-    for line in lines:
-        vendor = None
-        product = None
-        for pattern in vendor_patterns:
-            match = re.search(pattern, line, flags=re.IGNORECASE)
-            if match:
-                vendor = match.group(1)
-                break
-        for pattern in product_patterns:
-            match = re.search(pattern, line, flags=re.IGNORECASE)
-            if match:
-                product = match.group(1)
-                break
-        if not (vendor and product):
-            for pattern in pair_patterns:
-                match = re.search(pattern, line, flags=re.IGNORECASE)
-                if match:
-                    vendor = match.group(1)
-                    product = match.group(2)
-                    break
-        if vendor and product:
-            vendor = vendor.lower().zfill(4)
-            product = product.lower().zfill(4)
-            ids.append((vendor, product))
-        else:
-            stripped = line.strip()
-            if stripped:
-                unmatched.append(stripped)
-    deduped = list(dict.fromkeys(ids))
-    if unmatched:
+    result = parse_device_id_lines(lines)
+    if result.unmatched:
         max_logged = 5
         log("Could not parse device IDs from the following line(s):")
-        for line in unmatched[:max_logged]:
+        for line in result.unmatched[:max_logged]:
             log(f"  {line}")
-        remaining = len(unmatched) - max_logged
+        remaining = len(result.unmatched) - max_logged
         if remaining > 0:
             log(f"  ... and {remaining} more")
-    return deduped
+    return result.ids
 
 
 def probe_keyboard_hardware() -> list[tuple[str, str]]:
@@ -894,11 +832,7 @@ def ensure_udev_rule(device_ids: list[tuple[str, str]]) -> None:
 
     missing_ids = []
     for vendor, product in device_ids:
-        if (
-            existing_text
-            and f'ATTRS{{idVendor}}=="{vendor}"' in existing_text
-            and f'ATTRS{{idProduct}}=="{product}"' in existing_text
-        ):
+        if existing_text and existing_rule_contains_device(existing_text, vendor, product):
             log(f"Udev rule already present for {vendor}:{product}.")
             continue
         missing_ids.append((vendor, product))
@@ -923,13 +857,7 @@ def ensure_udev_rule(device_ids: list[tuple[str, str]]) -> None:
             if not existing_text:
                 handle.write("# Allow non-root access to ITE 8291 keyboards\n")
             for vendor, product in missing_ids:
-                rule_line = (
-                    'SUBSYSTEMS=="usb", '
-                    f'ATTRS{{idVendor}}=="{vendor}", '
-                    f'ATTRS{{idProduct}}=="{product}", '
-                    'MODE:="0666"'
-                )
-                handle.write(rule_line)
+                handle.write(format_udev_rule(vendor, product))
                 handle.write("\n")
         os.chmod(UDEV_RULE_PATH, 0o644)
     except OSError as exc:
@@ -1002,6 +930,14 @@ def deploy_files() -> None:
         raise InstallerError(f"Source directory not found at {SOURCE_DIR}")
     log(f"Deploying files to {SHARE_DIR}")
     SHARE_DIR.mkdir(parents=True, exist_ok=True)
+    for relative in LEGACY_PAYLOAD_FILES:
+        legacy_path = SHARE_DIR / relative
+        if legacy_path.exists():
+            try:
+                legacy_path.unlink()
+                log(f"Removed legacy payload file {legacy_path}")
+            except OSError as exc:
+                log(f"Failed to remove legacy payload file {legacy_path}: {exc}")
     for relative in FILES_TO_DEPLOY:
         src = SOURCE_DIR / relative
         dst = SHARE_DIR / relative
@@ -1028,7 +964,11 @@ def deploy_files() -> None:
             raise InstallerError(f"Missing source directory: {src_dir}")
         if dst_dir.exists():
             shutil.rmtree(dst_dir)
-        shutil.copytree(src_dir, dst_dir)
+        shutil.copytree(
+            src_dir,
+            dst_dir,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+        )
         log(f"Copied directory {src_dir} -> {dst_dir}")
 
 
@@ -1057,7 +997,8 @@ def create_wrapper() -> None:
     script = (
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
-        f"exec {VENV_PYTHON} {SHARE_DIR}/keyboard_backlight.py \"$@\"\n"
+        f"cd {shlex.quote(str(SHARE_DIR))}\n"
+        f"exec {VENV_PYTHON} -m xmg_backlight.app \"$@\"\n"
     )
     WRAPPER_PATH.write_text(script, encoding="utf-8")
     mark_executable(WRAPPER_PATH)
@@ -1083,7 +1024,11 @@ def create_desktop_entry() -> None:
 def create_restore_autostart_entry() -> None:
     log(f"Creating optional restore launcher at {AUTOSTART_PATH}")
     AUTOSTART_PATH.parent.mkdir(parents=True, exist_ok=True)
-    exec_cmd = f"{VENV_PYTHON} {SHARE_DIR}/restore_profile.py"
+    shell_cmd = (
+        f"cd {shlex.quote(str(SHARE_DIR))} && "
+        f"exec {shlex.quote(str(VENV_PYTHON))} -m xmg_backlight.restore_profile"
+    )
+    exec_cmd = f"/usr/bin/sh -c {shlex.quote(shell_cmd)}"
     entry = (
         "[Desktop Entry]\n"
         "Type=Application\n"

@@ -1,64 +1,21 @@
-#!/usr/bin/env python3
-"""Restore keyboard backlight profile saved by the GUI."""
+"""Restore the active keyboard backlight profile."""
 
-import json
-import os
+from __future__ import annotations
+
 import shlex
-import shutil
 import subprocess
 import sys
 import time
 from typing import List
 
-TOOL_ENV_VAR = "ITE8291R3_CTL"
-TOOL_CANDIDATES = [
-    os.environ.get(TOOL_ENV_VAR),
-    "/usr/local/bin/ite8291r3-ctl",
-    "ite8291r3-ctl",
-]
-
-CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "backlight-linux")
-PROFILE_PATH = os.path.join(CONFIG_DIR, "profile.json")
-
-
-def clamp(value, minimum, maximum, fallback):
-    try:
-        ivalue = int(value)
-    except (TypeError, ValueError):
-        return fallback
-    return max(minimum, min(maximum, ivalue))
-
-
-def resolve_tool():
-    for candidate in TOOL_CANDIDATES:
-        if not candidate:
-            continue
-        path = candidate
-        if not os.path.isabs(candidate):
-            resolved = shutil.which(candidate)
-            if not resolved:
-                continue
-            path = resolved
-        if os.path.exists(path) and os.access(path, os.X_OK):
-            return path
-    return None
-
-
-def read_profile():
-    try:
-        with open(PROFILE_PATH, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-            return data if isinstance(data, dict) else {}
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def sanitize_choice(value, options, fallback):
-    return value if value in options else fallback
+from .constants import PROFILE_PATH, TOOL_ENV_VAR
+from .driver import resolve_tool
+from .storage import active_profile_from_raw_store, read_profile_file
+from .ui_helpers import clamp_int
 
 
 def build_commands(profile):
-    brightness = clamp(profile.get("brightness"), 0, 50, 40)
+    brightness = clamp_int(profile.get("brightness"), 0, 50, 40)
     if brightness <= 0:
         return [["off"]]
 
@@ -71,10 +28,9 @@ def build_commands(profile):
         commands.append(["brightness", str(brightness)])
         return commands
 
-    # Effects
     args: List[str] = ["effect", "-b", str(brightness)]
 
-    speed = clamp(profile.get("speed"), 0, 10, 5)
+    speed = clamp_int(profile.get("speed"), 0, 10, 5)
     if speed != 5:
         args += ["-s", str(speed)]
 
@@ -195,22 +151,11 @@ def run_commands_with_retry(tool, commands):
 
 
 def main():
-    store = read_profile()
-    if not store:
+    store = read_profile_file()
+    profile = active_profile_from_raw_store(store)
+    if not profile:
         print(f"No profile found at {PROFILE_PATH}. Nothing to restore.")
         return 0
-
-    # Extract the active profile data from the store
-    active_name = store.get("active", "Default")
-    profiles = store.get("profiles", {})
-    if active_name in profiles:
-        profile = profiles[active_name]
-    elif profiles:
-        # Fallback to first available profile
-        profile = next(iter(profiles.values()))
-    else:
-        # Legacy format: profile data at root level
-        profile = store
 
     tool = resolve_tool()
     if not tool:
@@ -222,7 +167,7 @@ def main():
         return 1
 
     commands = build_commands(profile)
-    desired_brightness = clamp(profile.get("brightness"), 0, 50, 40)
+    desired_brightness = clamp_int(profile.get("brightness"), 0, 50, 40)
     rc = apply_profile_with_verification(tool, commands, desired_brightness)
     if rc != 0:
         printable = " / ".join(" ".join(cmd) for cmd in commands)
