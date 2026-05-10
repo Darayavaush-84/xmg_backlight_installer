@@ -763,16 +763,17 @@ def extract_device_ids(lines: list[str]) -> list[tuple[str, str]]:
     ids: list[tuple[str, str]] = []
     unmatched: list[str] = []
     vendor_patterns = [
-        r"\bidvendor\s*[:=]?\s*0x?([0-9a-fA-F]{4})\b",
-        r"\bvendor\s*[:=]?\s*0x?([0-9a-fA-F]{4})\b",
-        r"\bmanufacturer\s*[:=]?\s*0x?([0-9a-fA-F]{4})\b",
+        r"\bidvendor\s*[:=]?\s*(?:0x)?([0-9a-fA-F]{4})\b",
+        r"\bvendor\s*[:=]?\s*(?:0x)?([0-9a-fA-F]{4})\b",
+        r"\bmanufacturer\s*[:=]?\s*(?:0x)?([0-9a-fA-F]{4})\b",
     ]
     product_patterns = [
-        r"\bidproduct\s*[:=]?\s*0x?([0-9a-fA-F]{4})\b",
-        r"\bproduct\s*[:=]?\s*0x?([0-9a-fA-F]{4})\b",
+        r"\bidproduct\s*[:=]?\s*(?:0x)?([0-9a-fA-F]{4})\b",
+        r"\bproduct\s*[:=]?\s*(?:0x)?([0-9a-fA-F]{4})\b",
     ]
     pair_patterns = [
-        r"\bid\s+0x?([0-9a-fA-F]{4})\s*:\s*0x?([0-9a-fA-F]{4})\b",
+        r"\bid\s+(?:0x)?([0-9a-fA-F]{4})\s*:\s*(?:0x)?([0-9a-fA-F]{4})\b",
+        r"\b(?:0x)?([0-9a-fA-F]{4})\s*:\s*(?:0x)?([0-9a-fA-F]{4})\b",
     ]
     for line in lines:
         vendor = None

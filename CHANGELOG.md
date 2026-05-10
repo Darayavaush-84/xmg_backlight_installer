@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.0.1 – 2026-05-10
+### Installer
+- Fixed udev device ID parsing for `ite8291r3-ctl query --devices` output like `048d:6004 ...`, restoring automatic udev rule setup.
+
 ## v2.0.0 – 2026-01-24
 ### Installer
 - Added experimental support for Ubuntu

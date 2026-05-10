@@ -14,7 +14,7 @@ from collections import deque
 from PySide6 import QtCore, QtWidgets, QtGui
 
 APP_DISPLAY_NAME = "XMG Backlight Management"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 GITHUB_REPO_URL = "https://github.com/Darayavaush-84/xmg_backlight_installer"
 NOTIFICATION_TIMEOUT_MS = 1500
 ACTIVITY_LOG_MAX_LINES = 100
