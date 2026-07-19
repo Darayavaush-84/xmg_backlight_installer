@@ -1,8 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
 import argparse
 import sys
 import math
 
 from ite8291r3_ctl import ite8291r3
+from ite8291r3_ctl import __version__
 
 color_name_to_rgb = {
 	"black":   (0, 0, 0),
@@ -63,10 +66,11 @@ def screen_mode(handle, offset_x=None, offset_y=None, width=None, height=None):
 
 		now = time.monotonic()
 
-		if now-last_draw <= 0.1:
-			time.sleep(now-last_draw)
+		elapsed = now - last_draw
+		if elapsed < 0.1:
+			time.sleep(0.1 - elapsed)
 
-		last_draw = now
+		last_draw = time.monotonic()
 
 def main():
 	handle = None
@@ -79,6 +83,10 @@ def main():
 
 		if len(value) != 3:
 			raise argparse.ArgumentTypeError("must have exactly three integers")
+		if any(component < 0 or component > 255 for component in value):
+			raise argparse.ArgumentTypeError(
+				"each RGB component must be between 0 and 255"
+			)
 
 		return value
 
@@ -284,11 +292,12 @@ def main():
 				      f"manufacturer '{dev.manufacturer}'")
 
 	parser = argparse.ArgumentParser(description='ITE8291 (rev 0.03) RGB keyboard backlight controller driver.')
+	parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
 
 	parser.add_argument('--debug', action='store_true', help='print traffic between the device and this program to stderr')
 	parser.add_argument('--device', type=valid_devid, help='bus/addr of the device to control.')
 
-	subparsers = parser.add_subparsers(help='Subcommands.')
+	subparsers = parser.add_subparsers(help='Subcommands.', required=True)
 
 	parser_off = subparsers.add_parser('off', help='Turn keyboard backlight off.')
 	parser_off.set_defaults(func=handle_off_args)
@@ -348,16 +357,24 @@ def main():
 
 	args = parser.parse_args()
 
+	traffic_callback = None
 	if args.debug:
-		ite8291r3.DEBUG = True
+		traffic_callback = lambda *parts: print("debug:", *parts, file=sys.stderr)
 
-	try:
-		handle = ite8291r3.get(args.device)
-	except FileNotFoundError as e:
-		print(f"device handle could not be acquired: {e}")
-		return 1
+	query_devices_only = (
+		getattr(args, "devices", False)
+		and not getattr(args, "fw_version", False)
+		and not getattr(args, "brightness", False)
+		and not getattr(args, "state", False)
+	)
+	if not query_devices_only:
+		try:
+			handle = ite8291r3.get(args.device, traffic_callback)
+		except (FileNotFoundError, ValueError) as e:
+			print(f"device handle could not be acquired: {e}")
+			return 1
 
-	assert handle
+		assert handle
 
 	try:
 		if "func" in args:

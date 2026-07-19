@@ -1,18 +1,10 @@
 from __future__ import annotations
 
-import json
-import os
-import subprocess
 import time
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from .constants import *
-from .driver import TOOL, apply_effect_with_fallback, format_cli_error, format_log, run_cmd
-from .services import *
-from .storage import *
-from .translations import detect_system_language, load_translations
-from .ui_helpers import build_flag_icon, clamp_int, normalize_language_code, sanitize_choice, set_combo_by_data
+from .driver import format_log
 
 class ActivityLogMixin:
     def _append_activity_log_lines(self, text, level, timestamp):

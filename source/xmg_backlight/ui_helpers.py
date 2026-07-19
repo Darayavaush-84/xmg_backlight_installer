@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from PySide6 import QtCore, QtGui
 
+from .validation import clamp_int, normalize_language_code, sanitize_choice
+
 FLAG_ICON_CACHE = {}
 
 
@@ -63,24 +65,6 @@ def build_flag_icon(code):
     icon = QtGui.QIcon(pixmap)
     FLAG_ICON_CACHE[code] = icon
     return icon
-
-
-def normalize_language_code(value):
-    if not value:
-        return ""
-    return str(value).split("-")[0].split("_")[0].lower()
-
-
-def clamp_int(value, minimum, maximum, fallback):
-    try:
-        ivalue = int(value)
-    except (TypeError, ValueError):
-        return fallback
-    return max(minimum, min(maximum, ivalue))
-
-
-def sanitize_choice(value, options, fallback):
-    return value if value in options else fallback
 
 
 def set_combo_by_data(combo, value):

@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.5.0-rc1 – 2026-07-20
+
+- Bundled and verified the authoritative `ite8291r3-ctl` 0.4.post1 driver with explicit `048d:600b` revision `0003` support and no driver fallback to PyPI.
+- Rebuilt installation and uninstallation around a staged dedicated venv, atomic filesystem transactions, full ownership hashes, correct runtime permissions, safe automatic GUI shutdown, and secure `uaccess` udev rules.
+- Replaced polling and synthetic sleep targets with one event-driven login1/UPower automation service.
+- Unified settings, profiles, and power assignments in locked atomic state with migration and conflict detection.
+- Serialized and bounded hardware work, corrected zero-brightness/state verification, and made GUI results reflect completed commands.
+- Added substantial headless logic/integration coverage, atomic diagnostics, and assorted minor GUI, reliability, packaging, and maintenance fixes.
+
 ## v2.1.0 – 2026-05-11
 ### Installer
 - Fixed udev device ID parsing for `ite8291r3-ctl query --devices` output like `048d:6004 ...`, restoring automatic udev rule setup.

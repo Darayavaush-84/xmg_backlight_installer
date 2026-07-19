@@ -5,14 +5,7 @@ from __future__ import annotations
 import re
 
 
-def extract_app_version_from_text(content: str) -> str | None:
-    for line in content.splitlines():
-        if "APP_VERSION" not in line:
-            continue
-        match = re.search(r"APP_VERSION\s*=\s*[\"']([^\"']+)[\"']", line)
-        if match:
-            return match.group(1).strip()
-    return None
+_PRERELEASE_ORDER = {"alpha": 0, "beta": 1, "rc": 2}
 
 
 def parse_version(value: str) -> tuple[int, ...]:
@@ -22,21 +15,50 @@ def parse_version(value: str) -> tuple[int, ...]:
     if trimmed.lower().startswith("v"):
         trimmed = trimmed[1:]
     trimmed = trimmed.split("+", 1)[0].split("-", 1)[0]
-    parts = []
-    for part in trimmed.split("."):
-        match = re.match(r"([0-9]+)", part)
-        if match:
-            parts.append(int(match.group(1)))
-    return tuple(parts)
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", trimmed):
+        return tuple()
+    return tuple(int(part) for part in trimmed.split("."))
+
+
+def _comparison_key(value: str):
+    if not value:
+        return None
+    trimmed = value.strip()
+    if trimmed.lower().startswith("v"):
+        trimmed = trimmed[1:]
+    trimmed = trimmed.split("+", 1)[0]
+    match = re.fullmatch(
+        r"(?P<release>[0-9]+(?:\.[0-9]+)*)"
+        r"(?:-(?P<label>alpha|beta|rc)(?P<number>[0-9]+))?",
+        trimmed,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    release = tuple(int(part) for part in match.group("release").split("."))
+    label = match.group("label")
+    if label is None:
+        prerelease = (1, 0, 0)
+    else:
+        prerelease = (
+            0,
+            _PRERELEASE_ORDER[label.lower()],
+            int(match.group("number")),
+        )
+    return release, prerelease
 
 
 def is_newer_version(candidate: str, current: str) -> bool:
-    candidate_parts = parse_version(candidate)
-    current_parts = parse_version(current)
-    if not candidate_parts or not current_parts:
+    candidate_key = _comparison_key(candidate)
+    current_key = _comparison_key(current)
+    if candidate_key is None or current_key is None:
         return False
+    candidate_parts, candidate_prerelease = candidate_key
+    current_parts, current_prerelease = current_key
     max_len = max(len(candidate_parts), len(current_parts))
     candidate_parts += (0,) * (max_len - len(candidate_parts))
     current_parts += (0,) * (max_len - len(current_parts))
-    return candidate_parts > current_parts
-
+    return (candidate_parts, candidate_prerelease) > (
+        current_parts,
+        current_prerelease,
+    )

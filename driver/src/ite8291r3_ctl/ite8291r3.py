@@ -1,14 +1,17 @@
-import sys
+# SPDX-License-Identifier: GPL-2.0-only
 
 import usb.core
 import usb.util
 
 
-DEBUG = False
-
 VENDOR_ID   = 0x048D
-PRODUCT_IDS = [0x6004, 0x6006, 0xCE00]
-REV_NUMBER  = 0x0003 # 0.03
+SUPPORTED_DEVICES = {
+	(0x048D, 0x6004): frozenset({0x0003}),
+	(0x048D, 0x6006): frozenset({0x0003}),
+	(0x048D, 0x600B): frozenset({0x0003}),
+	(0x048D, 0xCE00): frozenset({0x0003}),
+}
+PRODUCT_IDS = sorted(product for (_, product) in SUPPORTED_DEVICES)
 
 NUM_ROWS = 6
 NUM_COLS = 21
@@ -56,7 +59,9 @@ class effect_attrs:
 	REACTIVE   = 4
 	SAVE       = 5
 
-def effect(effect_id, args={}):
+def effect(effect_id, args=None):
+
+	args = args or {}
 
 	max_arg_idx = max(map(lambda x: x[0], args.values()))
 
@@ -144,24 +149,27 @@ effects = {
 }
 
 class ite8291r3:
-	def __init__(self, channel):
-		self.channel = channel
+	def __init__(self, usb_dev, usb_out_descriptor, traffic_callback=None):
+		self.usb_dev = usb_dev
+		self.usb_out_descriptor = usb_out_descriptor
+		self.traffic_callback = traffic_callback
+
+	def __report_traffic(self, kind, direction, data):
+		if self.traffic_callback:
+			self.traffic_callback(kind, direction, data)
 
 	def __send_data(self, payload):
-		if DEBUG:
-			print(f"sending data ({len(payload)} bytes) to device: {payload}", file=sys.stderr)
-
-		return self.channel.write(payload)
+		self.__report_traffic("data", "out", payload)
+		return self.usb_dev.write(self.usb_out_descriptor, payload)
 
 	def __send_ctrl(self, *payload):
 		if len(payload) < 8:
 			payload += (0, ) * (8 - len(payload))
 
-		if DEBUG:
-			print(f"sending ctrl device: {payload}", file=sys.stderr)
+		self.__report_traffic("ctrl", "out", payload)
 
 		# https://github.com/libusb/hidapi/blob/533dd9229a846d6ab00c4dced1cbddf66b576258/libusb/hid.c#L1180
-		self.channel.ctrl_transfer(
+		self.usb_dev.ctrl_transfer(
 			usb.util.build_request_type(usb.util.CTRL_OUT,
 						    usb.util.CTRL_TYPE_CLASS,
 						    usb.util.CTRL_RECIPIENT_INTERFACE), # bmRequestType
@@ -173,7 +181,7 @@ class ite8291r3:
 	def __get_ctrl(self, length):
 
 		# https://github.com/libusb/hidapi/blob/533dd9229a846d6ab00c4dced1cbddf66b576258/libusb/hid.c#L1210
-		data = self.channel.ctrl_transfer(
+		data = self.usb_dev.ctrl_transfer(
 			usb.util.build_request_type(usb.util.CTRL_IN,
 						    usb.util.CTRL_TYPE_CLASS,
 						    usb.util.CTRL_RECIPIENT_INTERFACE), # bmRequestType
@@ -182,8 +190,7 @@ class ite8291r3:
 			0x001, # wIndex
 			length)
 
-		if DEBUG:
-			print(f"received ctrl from device: {data}", file=sys.stderr)
+		self.__report_traffic("ctrl", "in", data)
 
 		return data
 
@@ -281,7 +288,8 @@ class ite8291r3:
 			self.__set_row_index(row)
 			self.__send_data(bytearray(arr))
 
-	def set_key_colors(self, color_map={}, brightness=None, save=False, enable_user_mode=True):
+	def set_key_colors(self, color_map=None, brightness=None, save=False, enable_user_mode=True):
+		color_map = color_map or {}
 		arr = [ [0] * ROW_BUFFER_LEN for _ in range(NUM_ROWS) ]
 
 		for ((row, col), color) in color_map.items():
@@ -294,37 +302,45 @@ class ite8291r3:
 			self.__set_row_index(row)
 			self.__send_data(bytearray(arr[row]))
 
-class usb_channel:
-	def __init__(self, dev, fd_out):
-		self.dev = dev
-		self.fd_out = fd_out
+def is_supported_revision(vendor_id, product_id, revision):
+	revisions = SUPPORTED_DEVICES.get((vendor_id, product_id))
+	return revisions is not None and revision in revisions
 
-	def ctrl_transfer(self, *args, **kwargs):
-		return self.dev.ctrl_transfer(*args, **kwargs)
 
-	def write(self, payload):
-		return self.dev.write(self.fd_out, payload)
+def is_supported_device(dev):
+	return is_supported_revision(dev.idVendor, dev.idProduct, dev.bcdDevice)
 
-def get(loc=None):
+
+def get(loc=None, traffic_callback=None):
 	if loc:
 		(bus, addr) = loc
 		dev = usb.core.find(bus=bus, address=addr)
 	else:
-		dev = usb.core.find(idVendor=VENDOR_ID, custom_match=lambda d: d.idProduct in PRODUCT_IDS and d.bcdDevice == REV_NUMBER)
+		dev = usb.core.find(idVendor=VENDOR_ID, custom_match=is_supported_device)
 
 	if not dev:
 		raise FileNotFoundError("no suitable device found")
+	if not is_supported_device(dev):
+		raise ValueError(
+			f"unsupported device {dev.idVendor:04x}:{dev.idProduct:04x} "
+			f"revision {dev.bcdDevice:04x}"
+		)
 
 	if dev.is_kernel_driver_active(1):
 		dev.detach_kernel_driver(1)
 
 	cfg = dev.get_active_configuration()
 
-	fd_out = usb.util.find_descriptor(cfg[(1, 0)], custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT)
+	out_descriptor = usb.util.find_descriptor(
+		cfg[(1, 0)],
+		custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT,
+	)
+	if out_descriptor is None:
+		raise FileNotFoundError("no suitable USB output endpoint found")
 
-	return ite8291r3(usb_channel(dev, fd_out))
+	return ite8291r3(dev, out_descriptor, traffic_callback)
 
 def get_all():
 	return usb.core.find(find_all=True,
 			     idVendor=VENDOR_ID,
-			     custom_match=lambda d: d.idProduct in PRODUCT_IDS and d.bcdDevice == REV_NUMBER)
+				     custom_match=is_supported_device)

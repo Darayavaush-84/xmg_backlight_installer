@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "driver_distribution": "ite8291r3-ctl",
+  "driver_version": "0.4.post1",
+  "artifacts": [
+    {
+      "filename": "ite8291r3_ctl-0.4.post1-py3-none-any.whl",
+      "sha256": "fa07e1942c7670772c17422595711e67d06df5ef44913fa80bcc6dc294958d0b"
+    },
+    {
+      "filename": "pyusb-1.3.1-py3-none-any.whl",
+      "sha256": "bf9b754557af4717fe80c2b07cc2b923a9151f5c08d17bdb5345dac09d6a0430"
+    }
+  ]
+}

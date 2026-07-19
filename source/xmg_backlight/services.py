@@ -1,4 +1,4 @@
-"""Autostart and systemd user-service helpers."""
+"""Autostart and unified systemd user-service management."""
 
 from __future__ import annotations
 
@@ -6,20 +6,19 @@ import os
 import shlex
 import stat
 import subprocess
+import tempfile
 
 from .constants import (
     APP_DISPLAY_NAME,
     APP_ROOT,
-    AUTOSTART_DIR,
+    AUTOMATION_SERVICE_NAME,
+    AUTOMATION_SERVICE_PATH,
     AUTOSTART_ENTRY,
     POWER_MONITOR_SERVICE_NAME,
     POWER_MONITOR_SERVICE_PATH,
-    POWER_MONITOR_SCRIPT,
     PYTHON_EXECUTABLE,
-    RESTORE_SCRIPT,
     RESUME_SERVICE_NAME,
     RESUME_SERVICE_PATH,
-    SYSTEMD_USER_DIR,
 )
 
 
@@ -31,12 +30,43 @@ def module_exec(module_name: str) -> str:
     return f"/usr/bin/sh -c {shlex.quote(command)}"
 
 
-def ensure_autostart_dir():
-    os.makedirs(AUTOSTART_DIR, exist_ok=True)
+def _atomic_text_write(path: str, contents: str) -> None:
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    directory_info = os.lstat(directory)
+    if not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.getuid():
+        raise OSError(f"Unsafe integration directory: {directory}")
+    descriptor, tmp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp",
+        dir=directory,
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(contents)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def autostart_entry_contents():
     return (
+        "# Managed by XMG Backlight\n"
         "[Desktop Entry]\n"
         "Type=Application\n"
         f"Name={APP_DISPLAY_NAME}\n"
@@ -47,190 +77,193 @@ def autostart_entry_contents():
 
 
 def is_autostart_enabled():
-    return os.path.isfile(AUTOSTART_ENTRY)
+    if not os.path.isfile(AUTOSTART_ENTRY):
+        return False
+    try:
+        with open(AUTOSTART_ENTRY, "r", encoding="utf-8") as handle:
+            return handle.read() == autostart_entry_contents()
+    except OSError:
+        return False
 
 
 def create_autostart_entry():
-    ensure_autostart_dir()
-    tmp_path = AUTOSTART_ENTRY + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        handle.write(autostart_entry_contents())
-    os.replace(tmp_path, AUTOSTART_ENTRY)
+    contents = autostart_entry_contents()
+    _assert_replaceable_user_file(
+        AUTOSTART_ENTRY,
+        allowed_contents=(contents, contents.split("\n", 1)[1]),
+    )
+    _atomic_text_write(AUTOSTART_ENTRY, contents)
 
 
 def remove_autostart_entry():
-    try:
-        os.remove(AUTOSTART_ENTRY)
-    except FileNotFoundError:
-        pass
-
-
-def ensure_restore_script_executable():
-    try:
-        st = os.stat(RESTORE_SCRIPT)
-    except FileNotFoundError:
-        return
-    new_mode = st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
-    if new_mode != st.st_mode:
-        try:
-            os.chmod(RESTORE_SCRIPT, new_mode)
-        except OSError:
-            pass
-
-
-def ensure_systemd_user_dir():
-    os.makedirs(SYSTEMD_USER_DIR, exist_ok=True)
-
-
-def resume_service_contents():
-    exec_cmd = module_exec("xmg_backlight.restore_profile")
-    exec_stop_post = f"/usr/bin/sh -c {shlex.quote('sleep 2; ' + exec_cmd)}"
-    return (
-        "[Unit]\n"
-        "Description=Restore keyboard backlight after suspend/resume\n"
-        "After=sleep.target suspend.target hibernate.target hybrid-sleep.target\n"
-        "StopWhenUnneeded=yes\n\n"
-        "[Service]\n"
-        "Type=oneshot\n"
-        "RemainAfterExit=yes\n"
-        "ExecStart=/usr/bin/true\n"
-        f"ExecStopPost={exec_stop_post}\n\n"
-        "[Install]\n"
-        "WantedBy=sleep.target\n"
-        "WantedBy=suspend.target\n"
-        "WantedBy=hibernate.target\n"
-        "WantedBy=hybrid-sleep.target\n"
+    contents = autostart_entry_contents()
+    _remove_owned_user_file(
+        AUTOSTART_ENTRY, allowed_contents=(contents, contents.split("\n", 1)[1])
     )
 
 
-def ensure_resume_service_file():
-    ensure_systemd_user_dir()
-    contents = resume_service_contents()
-    tmp_path = RESUME_SERVICE_PATH + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        handle.write(contents)
-    os.replace(tmp_path, RESUME_SERVICE_PATH)
-
-
-def remove_resume_service_file():
-    try:
-        os.remove(RESUME_SERVICE_PATH)
-    except FileNotFoundError:
-        pass
-
-
-def power_monitor_service_contents():
-    ensure_restore_script_executable()
-    exec_cmd = module_exec("xmg_backlight.power_state_monitor")
+def automation_service_contents():
     return (
+        "# Managed by XMG Backlight\n"
         "[Unit]\n"
-        "Description=Keyboard backlight power monitor\n"
-        "After=graphical-session.target\n"
+        "Description=XMG keyboard backlight automation\n"
+        "After=graphical-session.target dbus.service\n"
         "PartOf=graphical-session.target\n\n"
         "[Service]\n"
         "Type=simple\n"
-        f"ExecStart={exec_cmd}\n"
+        f"ExecStart={module_exec('xmg_backlight.automation_daemon')}\n"
         "Restart=on-failure\n"
-        "RestartSec=3\n\n"
+        "RestartSec=3\n"
+        "NoNewPrivileges=yes\n"
+        "PrivateTmp=yes\n\n"
         "[Install]\n"
         "WantedBy=default.target\n"
     )
 
 
-def ensure_power_monitor_service_file():
-    ensure_systemd_user_dir()
-    contents = power_monitor_service_contents()
-    tmp_path = POWER_MONITOR_SERVICE_PATH + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        handle.write(contents)
-    os.replace(tmp_path, POWER_MONITOR_SERVICE_PATH)
+def ensure_automation_service_file():
+    contents = automation_service_contents()
+    _assert_replaceable_user_file(
+        AUTOMATION_SERVICE_PATH,
+        allowed_contents=(contents, contents.split("\n", 1)[1]),
+    )
+    _atomic_text_write(AUTOMATION_SERVICE_PATH, contents)
 
 
-def remove_power_monitor_service_file():
-    try:
-        os.remove(POWER_MONITOR_SERVICE_PATH)
-    except FileNotFoundError:
-        pass
+def remove_automation_service_file():
+    contents = automation_service_contents()
+    _remove_owned_user_file(
+        AUTOMATION_SERVICE_PATH,
+        allowed_contents=(contents, contents.split("\n", 1)[1]),
+    )
+
+
+def _read_regular_user_file(path):
+    if not os.path.lexists(path):
+        return None
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise OSError(f"Refusing unsafe integration file: {path}")
+    with open(path, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _assert_replaceable_user_file(
+    path, *, allowed_contents=(), legacy_markers=()
+):
+    contents = _read_regular_user_file(path)
+    if contents is None:
+        return
+    if contents in allowed_contents or any(
+        marker in contents for marker in legacy_markers
+    ):
+        return
+    raise OSError(f"Refusing to replace an unowned integration file: {path}")
+
+
+def _remove_owned_user_file(path, *, allowed_contents=(), legacy_markers=()):
+    contents = _read_regular_user_file(path)
+    if contents is None:
+        return False
+    if contents not in allowed_contents and not any(
+        marker in contents for marker in legacy_markers
+    ):
+        raise OSError(f"Refusing to remove an unowned integration file: {path}")
+    os.remove(path)
+    return True
 
 
 def systemctl_user(args):
-    cmd = ["systemctl", "--user", *args]
     try:
-        proc = subprocess.run(cmd, text=True, capture_output=True)
-        return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+        process = subprocess.run(
+            ["systemctl", "--user", *args],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
     except FileNotFoundError:
         return 127, "", "systemctl not found"
+    except subprocess.TimeoutExpired:
+        return 124, "", "systemctl --user timed out"
+    return (
+        process.returncode,
+        (process.stdout or "").strip(),
+        (process.stderr or "").strip(),
+    )
 
 
-def is_power_monitor_enabled():
-    rc, out, err = systemctl_user(["is-enabled", POWER_MONITOR_SERVICE_NAME])
+def automation_service_status():
+    rc, out, err = systemctl_user(["is-enabled", AUTOMATION_SERVICE_NAME])
     if rc == 0:
         return True, "Enabled"
-    if rc in (1, 2, 3, 4, 5):
-        detail = err or out or "Disabled"
-        if detail:
-            normalized = detail.lower().replace("-", " ")
-            if "not found" in normalized:
-                detail = "Disabled"
-        return False, detail
+    detail = err or out
     if rc == 127:
         return False, "systemctl not available"
-    return False, err or out or f"Status unknown (rc={rc})"
-
-
-def enable_power_monitor_service():
-    ensure_restore_script_executable()
-    ensure_power_monitor_service_file()
-    rc, _, err = systemctl_user(["daemon-reload"])
-    if rc != 0:
-        return False, err or "Failed to reload systemd user daemon."
-    rc, out, err = systemctl_user(["enable", "--now", POWER_MONITOR_SERVICE_NAME])
-    if rc != 0:
-        return False, err or out or "Failed to enable power monitor."
-    return True, "Power monitor enabled."
-
-
-def disable_power_monitor_service():
-    rc, out, err = systemctl_user(["disable", "--now", POWER_MONITOR_SERVICE_NAME])
-    if rc not in (0, 1, 5):
-        return False, err or out or "Failed to disable power monitor."
-    remove_power_monitor_service_file()
-    rc, _, _ = systemctl_user(["daemon-reload"])
-    return True, "Power monitor disabled."
-
-
-def is_resume_service_enabled():
-    rc, out, err = systemctl_user(["is-enabled", RESUME_SERVICE_NAME])
-    if rc == 0:
-        return True, "Enabled"
-    if rc in (1, 2, 3, 4, 5):
-        detail = err or out or "Disabled"
-        if detail:
-            normalized = detail.lower().replace("-", " ")
-            if "not found" in normalized:
-                detail = "Disabled"
+    if rc == 124:
         return False, detail
-    if rc == 127:
-        return False, "systemctl not available"
-    return False, err or out or f"Status unknown (rc={rc})"
+    if detail in {"disabled", "not-found", "No such file or directory"}:
+        return False, "Disabled"
+    return False, detail or f"Unable to query service status (rc={rc})"
 
 
-def enable_resume_service():
-    ensure_restore_script_executable()
-    ensure_resume_service_file()
+def _remove_legacy_automation_units():
+    for name, path in (
+        (RESUME_SERVICE_NAME, RESUME_SERVICE_PATH),
+        (POWER_MONITOR_SERVICE_NAME, POWER_MONITOR_SERVICE_PATH),
+    ):
+        if not os.path.lexists(path):
+            continue
+        _assert_replaceable_user_file(
+            path,
+            legacy_markers=("xmg_backlight.",),
+        )
+        rc, out, err = systemctl_user(["disable", "--now", name])
+        if rc not in (0, 1, 5):
+            raise OSError(err or out or f"Failed to disable legacy unit {name}")
+        _remove_owned_user_file(path, legacy_markers=("xmg_backlight.",))
+
+
+def reconcile_automation_service(settings: dict):
+    desired = bool(
+        settings.get("resume_enabled", False)
+        or settings.get("power_monitor_enabled", False)
+    )
+    try:
+        _remove_legacy_automation_units()
+        if desired:
+            ensure_automation_service_file()
+    except OSError as exc:
+        return False, str(exc)
+    if desired:
+        rc, _, err = systemctl_user(["daemon-reload"])
+        if rc != 0:
+            return False, err or "Failed to reload the systemd user daemon."
+        rc, out, err = systemctl_user(["enable", AUTOMATION_SERVICE_NAME])
+        if rc != 0:
+            return False, err or out or "Failed to enable automation service."
+        rc, out, err = systemctl_user(["restart", AUTOMATION_SERVICE_NAME])
+        if rc != 0:
+            return False, err or out or "Failed to restart automation service."
+        return True, "Automation service enabled."
+
+    if os.path.lexists(AUTOMATION_SERVICE_PATH):
+        try:
+            contents = automation_service_contents()
+            _assert_replaceable_user_file(
+                AUTOMATION_SERVICE_PATH,
+                allowed_contents=(contents, contents.split("\n", 1)[1]),
+            )
+        except OSError as exc:
+            return False, str(exc)
+        rc, out, err = systemctl_user(
+            ["disable", "--now", AUTOMATION_SERVICE_NAME]
+        )
+        if rc not in (0, 1, 5):
+            return False, err or out or "Failed to disable automation service."
+        try:
+            remove_automation_service_file()
+        except OSError as exc:
+            return False, str(exc)
     rc, _, err = systemctl_user(["daemon-reload"])
     if rc != 0:
-        return False, err or "Failed to reload systemd user daemon."
-    rc, out, err = systemctl_user(["enable", RESUME_SERVICE_NAME])
-    if rc != 0:
-        return False, err or out or "Failed to enable resume service."
-    return True, "Resume service enabled."
-
-
-def disable_resume_service():
-    rc, out, err = systemctl_user(["disable", RESUME_SERVICE_NAME])
-    if rc not in (0, 1, 5):
-        return False, err or out or "Failed to disable resume service."
-    remove_resume_service_file()
-    rc, _, _ = systemctl_user(["daemon-reload"])
-    return True, "Resume service disabled."
+        return False, err or "Failed to reload the systemd user daemon."
+    return True, "Automation service disabled."

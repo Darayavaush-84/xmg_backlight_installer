@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import signal
 import sys
 from collections import deque
 
@@ -7,28 +8,63 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from .activity_log_mixin import ActivityLogMixin
 from .automation_mixin import AutomationMixin
-from .constants import *
+from .capabilities import DIRECTIONS, DYNAMIC_COLORS, EFFECTS, STATIC_COLORS
+from .constants import (
+    ACTIVITY_LOG_MAX_LINES,
+    APP_DISPLAY_NAME,
+    APP_VERSION,
+    AUTOSTART_ENTRY,
+    LANGUAGE_LABELS,
+)
 from .device_mixin import DeviceMixin
 from .effects_mixin import EffectsMixin
 from .export_mixin import ExportMixin
 from .language_mixin import LanguageMixin
 from .profile_mixin import ProfileMixin
-from .services import ensure_restore_script_executable, is_autostart_enabled, is_power_monitor_enabled, is_resume_service_enabled
-from .storage import acquire_single_instance_lock, load_profile_store, load_settings
+from .services import (
+    automation_service_status,
+    is_autostart_enabled,
+    reconcile_automation_service,
+)
+from .storage import (
+    StorageFormatError,
+    acquire_single_instance_lock,
+    ensure_profile_store,
+    load_settings,
+)
 from .theme_mixin import ThemeMixin
 from .translations import detect_system_language, load_translations
 from .tray_mixin import TrayMixin
-from .ui_helpers import build_flag_icon, clamp_int, normalize_language_code, sanitize_choice, set_combo_by_data
+from .ui_helpers import (
+    build_flag_icon,
+    clamp_int,
+    normalize_language_code,
+    sanitize_choice,
+    set_combo_by_data,
+)
 
-class Main(LanguageMixin, ActivityLogMixin, ExportMixin, TrayMixin, DeviceMixin, ThemeMixin, ProfileMixin, AutomationMixin, EffectsMixin, QtWidgets.QWidget):
+
+class Main(
+    LanguageMixin,
+    ActivityLogMixin,
+    ExportMixin,
+    TrayMixin,
+    DeviceMixin,
+    ThemeMixin,
+    ProfileMixin,
+    AutomationMixin,
+    EffectsMixin,
+    QtWidgets.QWidget,
+):
     def __init__(self, *, enable_tray=True):
         super().__init__()
+        self._pending_settings_error = ""
         self.setWindowTitle(f"{APP_DISPLAY_NAME} v{APP_VERSION}")
         self.resize(980, 500)
         self.activity_log_buffer = deque(maxlen=ACTIVITY_LOG_MAX_LINES)
 
         QtWidgets.QApplication.setStyle("Fusion")
-        QtWidgets.QApplication.setQuitOnLastWindowClosed(False)
+        QtWidgets.QApplication.setQuitOnLastWindowClosed(True)
         base_icon = QtGui.QIcon.fromTheme("input-keyboard")
         if base_icon.isNull():
             base_icon = self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon)
@@ -43,28 +79,49 @@ class Main(LanguageMixin, ActivityLogMixin, ExportMixin, TrayMixin, DeviceMixin,
         self.translations = load_translations(self.language)
         self.fallback_translations = load_translations("en")
         self.tray_supported = QtWidgets.QSystemTrayIcon.isSystemTrayAvailable()
+        QtWidgets.QApplication.setQuitOnLastWindowClosed(
+            not (
+                self.tray_supported
+                and self.settings.get("start_in_tray", False)
+            )
+        )
         self.is_off = False
         self.last_brightness = 40
         self.last_static_color = "white"
         self._suppress = False
-        self._pending_effect_after_brightness = False
         self._ignore_profile_events = False
         self._updating_profile_combo = False
         self._profile_dirty = False
-        ensure_restore_script_executable()
-        self.profile_store = load_profile_store()
+        self._external_profile_change_pending = False
+        self.hardware_pool = QtCore.QThreadPool(self)
+        self.hardware_pool.setMaxThreadCount(1)
+        self._hardware_tasks = set()
+        self._hardware_generations = {}
+        self._hardware_shutdown = False
+        self.profile_store = ensure_profile_store()
         self.active_profile_name = self.profile_store["active"]
         self.profile_data = dict(self.profile_store["profiles"][self.active_profile_name])
         self.autostart_enabled = is_autostart_enabled()
         if self.autostart_enabled and not self.settings.get("start_in_tray", False):
+            previous_settings = dict(self.settings)
             self.settings["start_in_tray"] = True
-            self.save_settings()
-        self.resume_enabled = False
-        self.resume_status = "Unknown"
-        status_enabled, status_text = is_resume_service_enabled()
-        self.resume_enabled = status_enabled
-        self.resume_status = status_text
-        self.power_monitor_enabled, self.power_monitor_status = is_power_monitor_enabled()
+            if not self.save_settings():
+                self.settings = previous_settings
+        self.resume_enabled = bool(self.settings.get("resume_enabled", False))
+        self.power_monitor_enabled = bool(
+            self.settings.get("power_monitor_enabled", False)
+        )
+        self._automation_reconcile_error = ""
+        if self.resume_enabled or self.power_monitor_enabled:
+            automation_ok, automation_status = reconcile_automation_service(
+                self.settings
+            )
+            if not automation_ok:
+                self._automation_reconcile_error = automation_status
+        else:
+            _, automation_status = automation_service_status()
+        self.resume_status = automation_status
+        self.power_monitor_status = automation_status
         self.profile_watcher = QtCore.QFileSystemWatcher(self)
         self.profile_watcher.fileChanged.connect(self.on_profile_file_changed)
         self.profile_watcher.directoryChanged.connect(self.on_profile_directory_changed)
@@ -74,7 +131,7 @@ class Main(LanguageMixin, ActivityLogMixin, ExportMixin, TrayMixin, DeviceMixin,
                 self.profile_data.get("brightness"), 0, 50, self.last_brightness
             )
             self.last_static_color = sanitize_choice(
-                self.profile_data.get("static_color"), COLORS, self.last_static_color
+                self.profile_data.get("static_color"), STATIC_COLORS, self.last_static_color
             )
 
         self.setObjectName("MainView")
@@ -231,7 +288,7 @@ class Main(LanguageMixin, ActivityLogMixin, ExportMixin, TrayMixin, DeviceMixin,
         self.static_label = QtWidgets.QLabel(self.tr("effects.static_color"))
         mode_row.addWidget(self.static_label)
         self.static_color = QtWidgets.QComboBox()
-        for color in COLORS:
+        for color in STATIC_COLORS:
             self.static_color.addItem(self.tr(f"color.{color}"), color)
         set_combo_by_data(self.static_color, self.last_static_color)
         mode_row.addWidget(self.static_color, 1)
@@ -255,7 +312,7 @@ class Main(LanguageMixin, ActivityLogMixin, ExportMixin, TrayMixin, DeviceMixin,
         epl.addWidget(self.dynamic_color_label, 0, 2)
         self.color = QtWidgets.QComboBox()
         self.color.addItem(self.tr("color.none"), "none")
-        for color in COLORS:
+        for color in DYNAMIC_COLORS:
             self.color.addItem(self.tr(f"color.{color}"), color)
         set_combo_by_data(self.color, "none")
         epl.addWidget(self.color, 0, 3)
@@ -564,6 +621,10 @@ class Main(LanguageMixin, ActivityLogMixin, ExportMixin, TrayMixin, DeviceMixin,
         self.refresh_autostart_flag()
         self.refresh_resume_controls()
         self.refresh_power_monitor_controls()
+        if self._automation_reconcile_error:
+            self.set_status(self._automation_reconcile_error, level="error")
+        if self._pending_settings_error:
+            self.set_status(self._pending_settings_error, level="error")
         self.refresh_profile_combo()
         self.refresh_power_profile_combos()
 
@@ -578,33 +639,64 @@ class Main(LanguageMixin, ActivityLogMixin, ExportMixin, TrayMixin, DeviceMixin,
 
 def main():
     app = QtWidgets.QApplication([])
+    language = detect_system_language()
+    translations = load_translations(language)
+    fallback = load_translations("en")
 
-    lock_handle = acquire_single_instance_lock()
+    def startup_tr(key, **kwargs):
+        text = translations.get(key) or fallback.get(key) or key
+        if kwargs:
+            try:
+                return text.format(**kwargs)
+            except (KeyError, ValueError):
+                return text
+        return text
+
+    try:
+        lock_handle = acquire_single_instance_lock()
+    except (OSError, StorageFormatError) as exc:
+        QtWidgets.QMessageBox.critical(
+            None,
+            APP_DISPLAY_NAME,
+            startup_tr("dialogs.storage_error", error=str(exc)),
+        )
+        return 1
     if lock_handle is None:
-        language = detect_system_language()
-        translations = load_translations(language)
-        fallback = load_translations("en")
-
-        def tr(key, **kwargs):
-            text = translations.get(key) or fallback.get(key) or key
-            if kwargs:
-                try:
-                    return text.format(**kwargs)
-                except (KeyError, ValueError):
-                    return text
-            return text
-
         QtWidgets.QMessageBox.warning(
             None,
             APP_DISPLAY_NAME,
-            tr("dialogs.app_already_running"),
+            startup_tr("dialogs.app_already_running"),
         )
-        sys.exit(0)
+        return 0
 
-    w = Main()
+    try:
+        w = Main()
+    except (OSError, StorageFormatError) as exc:
+        QtWidgets.QMessageBox.critical(
+            None,
+            APP_DISPLAY_NAME,
+            startup_tr("dialogs.storage_error", error=str(exc)),
+        )
+        return 1
+    app.aboutToQuit.connect(w.shutdown_hardware_tasks)
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+
+    def request_shutdown(_signum, _frame):
+        QtCore.QTimer.singleShot(0, w.on_tray_quit)
+
+    signal.signal(signal.SIGTERM, request_shutdown)
+    # Periodically return control to Python so SIGTERM is dispatched while Qt
+    # owns the main event loop.
+    signal_timer = QtCore.QTimer(app)
+    signal_timer.setInterval(100)
+    signal_timer.timeout.connect(lambda: None)
+    signal_timer.start()
     if not (w.settings.get("start_in_tray", False) and w.tray_supported and w.tray_icon):
         w.show()
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
 
 
 if __name__ == "__main__":

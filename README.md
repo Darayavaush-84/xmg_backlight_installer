@@ -1,171 +1,186 @@
 # XMG Backlight Installer
 
-XMG Backlight Installer helps you deploy the **backlight-linux** GUI for ITE 8291 RGB keyboards found in XMG/Tongfang laptops. It installs the GUI and uses systemd user services so your last profile can be restored automatically after suspend/hibernate and power-source changes.
+XMG Backlight Installer deploys XMG Backlight Management, a PySide6 GUI for
+ITE 8291 RGB keyboard controllers used in XMG/Tongfang laptops. Release 2.5.0-rc1
+ships its own audited driver wheel: it does not depend on, replace, or fall
+back to an unrelated `ite8291r3-ctl` installation.
 
-Special thanks to **Barnabás Pőcze** and contributors for the `ite8291r3-ctl` driver. Without their excellent work, this GUI would not be possible.
-
-## Screenshot
+The low-level driver is derived from
+[`pobrn/ite8291r3-ctl`](https://github.com/pobrn/ite8291r3-ctl) 0.4. Thanks to
+Barnabás Pőcze and all upstream contributors for their work.
 
 ![XMG Backlight Management](gui.png)
 
-## Repository layout
+## What is bundled
 
 | Path | Purpose |
 | --- | --- |
-| `installer_lib/` | Installer helper modules (version parsing, udev helpers). |
-| `source/xmg_backlight/` | Application package (GUI, restore helper, power monitor, translations, shared storage/CLI/service helpers). |
-| `source/ite8291r3_ctl/` | Vendored upstream driver source for reference and local packaging. |
-| `tests/` | Unit tests for installer/application helper behavior. |
-| `install.py` | Top-level installer script to run with sudo. |
-| `.gitignore` | Local development exclusions (bytecode, build artifacts, IDE files, etc.). |
+| `driver/` | Source and GPLv2 license of the bundled driver fork. |
+| `vendor/` | Versioned driver and pyusb wheels plus their SHA-256 manifest. |
+| `source/xmg_backlight/` | GPLv3 GUI, automation daemon, persistence, and diagnostics. |
+| `installer_lib/` | Artifact, ownership, transaction, process, and udev logic. |
+| `tests/` | Headless logic and integration tests. |
+| `install.py` | Transactional system installer and uninstaller. |
+
+The bundled driver currently accepts only these explicit device/revision
+combinations:
+
+| USB ID | Revision |
+| --- | --- |
+| `048d:6004` | `0003` |
+| `048d:6006` | `0003` |
+| `048d:600b` | `0003` |
+| `048d:ce00` | `0003` |
+
+An unknown product or revision is rejected rather than treated as compatible.
 
 ## Requirements
 
-* Linux distribution with `systemd` user sessions.
-* Python 3.10+ with `venv` (python3-venv on Debian/Ubuntu) and `pip`.
-* Root privileges to deploy files under `/usr/share`, `/usr/local/bin`, `/etc/xdg`, etc.
-* USB access to the keyboard controller (ensure `ite8291r3-ctl` works on your device).
+- Linux with udev, libusb, systemd user sessions, login1, and UPower D-Bus.
+- Python 3.10 or newer with the `venv` module and pip.
+- Root privileges for the system installation.
+- Network access to install the pinned `PySide6==6.11.0` GUI dependency.
 
-## Distribution support
+The driver and pyusb wheels are local repository artifacts and are installed
+offline with `--no-index --no-deps`. Runtime packages are never installed into
+the system Python.
 
-| Distribution family | Status | Notes |
-| --- | --- | --- |
-| Fedora/RHEL-like | Tested | The installer can attempt to install `python3-pip` via `dnf`/`yum` when needed. |
-| Arch-like / CachyOS | Tested | The driver and udev setup have been verified with `048d:6004` device detection. |
-| Debian/Ubuntu-like | Experimental | The installer can attempt to install `python3-venv`, `python3-pip`, and `libusb-1.0-0` via `apt-get` when needed. |
-| Other systemd-based distributions | Community | Expected to work if Python, pip/venv, libusb, udev, and systemd user sessions are available. |
+The bundled driver uses direct USB access and cannot safely share the same HID
+interface with the `ite_8291` module from `tuxedo-drivers`. This release
+candidate does not alter modprobe configuration automatically. Systems using
+that module should treat XMG Backlight and the kernel RGB driver as alternative
+owners and report any TUXEDO Control Center interaction during testing.
 
 ## Installation
 
-1. Clone the repository and enter the project directory:
-   ```bash
-   git clone https://github.com/Darayavaush-84/xmg_backlight_installer.git
-   cd xmg_backlight_installer
-   ```
-2. Run the installer as root:
-   ```bash
-   sudo python3 install.py
-   ```
-   The installer creates a virtual environment under `/usr/local/lib/xmg-backlight-venv`
-   to avoid modifying the system Python. If you run the installer from a venv, it still
-   uses the system Python to avoid nested venvs.
-3. Launch **XMG Backlight Management** from your desktop menu, the GUI will automatically load in the systray, with double click you can open it and enable the automation toggles (resume + power monitor) if desired.
+```bash
+git clone https://github.com/Darayavaush-84/xmg_backlight_installer.git
+cd xmg_backlight_installer
+sudo python3 install.py
+```
+
+The installer preserves a dedicated environment at:
+
+```text
+/usr/local/lib/xmg-backlight-venv
+```
+
+For every installation or upgrade it creates a fresh temporary venv, validates
+the pinned GUI dependency and bundled driver, rewrites generated venv metadata
+for the final path, and validates the committed environment again. The venv,
+application package, wrappers, desktop entry, udev rule, and ownership manifest
+are replaced through a rollback-capable filesystem transaction.
+Immediately before that transaction, the installer safely identifies, closes,
+and waits for any running GUI instance; unrelated Python processes are ignored.
+
+The ownership manifest is stored at
+`/var/lib/xmg-backlight/install-manifest.json`. It records exact hashes for
+managed files and complete directory trees. Existing unowned or locally
+modified targets are refused.
+
+The installed USB rule is `/etc/udev/rules.d/70-xmg-backlight.rules`. It uses
+`TAG+="uaccess"`, so access is granted to the active local session without a
+world-writable `0666` device node.
+
+Use `--skip-update-check` only when intentionally installing this checked-out
+version without consulting the latest GitHub release metadata.
 
 ## Uninstallation
 
-To remove the installed files and configurations:
+The default operation removes the managed system application and user
+integrations for the invoking desktop user, while retaining the dedicated venv
+and user profiles:
 
 ```bash
 sudo python3 install.py --uninstall
 ```
 
-When run without additional flags, the installer will prompt you to choose:
-1. **Partial removal** - removes system files (launcher, driver wrapper, desktop entry, udev rule, installer log) plus user services/autostart entries; keeps user profiles and the venv
-2. **Full removal** - removes everything including the venv/pip packages and user profiles
-
-### Command-line flags
-
-For scripted/non-interactive uninstallation:
+Additional explicit scopes are available:
 
 ```bash
-# Remove system files only
-sudo python3 install.py --uninstall
-
-# Also remove the virtual environment (ite8291r3-ctl, PySide6, shiboken6)
+# Also remove the dedicated application venv
 sudo python3 install.py --uninstall --purge
 
-# Also remove user profiles (~/.config/backlight-linux/)
+# Also remove the invoking user's profiles/settings
 sudo python3 install.py --uninstall --purge-user-data
 
-# Full removal (pip packages + user profiles)
-sudo python3 install.py --uninstall --purge --purge-user-data
+# Purge profiles/settings and integrations for every desktop user
+sudo python3 install.py --uninstall --purge-user-data --all-users
+
+# Full system and all-user purge
+sudo python3 install.py --uninstall --purge --purge-user-data --all-users
 ```
 
-If the venv cannot be removed, the installer falls back to `pip uninstall` for those packages.
-Uninstall is best-effort; permission issues will be logged but won't abort.
+Destructive flags without `--uninstall` are rejected. `--all-users` also
+requires `--purge-user-data`. Before removing anything, the uninstaller checks
+every requested target; a modified or unowned artifact aborts the operation.
+System files and directories are then removed transactionally. There is no
+global-pip cleanup and no package-uninstall fallback.
 
-The installer performs these actions:
-* Installs `ite8291r3-ctl` and `PySide6` into a dedicated virtual environment.
-* Copies the `xmg_backlight` application package into `/usr/share/xmg-backlight`.
-* Creates a launcher wrapper at `/usr/local/bin/xmg-backlight` and a desktop entry under `/usr/share/applications`.
-* Creates a disabled system-wide autostart entry at `/etc/xdg/autostart/xmg-backlight-restore.desktop` (optional restore helper).
-* Installs a udev rule for detected device IDs at `/etc/udev/rules.d/99-ite8291.rules` (`0666`).
-  The udev rule is permissive for simplicity; for tighter security use a group-based rule or `TAG+="uaccess"`.
-* Probes for compatible ITE 8291 keyboards; if none are found you can abort safely and the just-installed driver will be removed automatically.
-* Resume restore and power monitoring are controlled from the GUI using systemd user services.
+## Profiles and persistence
 
-Uninstall also removes the udev rule and `/var/log/xmg-backlight/installer.log`.
-The update check is optional, shows release notes, and never auto-downloads the installer.
+Profiles, preferences, and AC/battery assignments live in one private,
+locked document:
 
-## System tray and notifications
+```text
+~/.config/backlight-linux/state.json
+```
 
-The GUI exposes two user-facing preferences (stored under `~/.config/backlight-linux/settings.json`):
+Release 2.5.0-rc1 migrates the older `profile.json` and `settings.json` documents
+once. Writes use a unique temporary file, `fsync`, and atomic replacement.
+Profile revisions prevent stale writers from overwriting newer state. Renaming
+or deleting a profile updates its power assignments in the same atomic commit.
 
-- **Add in systray** - start the application minimized to the system tray and keep it running even when the window is closed. A tray icon provides quick actions (Show/Hide window, Turn on/off, Profiles submenu, Quit).
-- **Show notifications** - toggle desktop toasts emitted by the tray commands (short messages such as "Minimized to tray").
+If a power state has no assigned profile, automation performs no change; it
+does not silently apply another profile.
 
-The tray icon includes a **Profiles** submenu that lets you switch between saved profiles without opening the main window.
+## Resume and power automation
 
-Both options live in the "Smart automations" card on the right-hand side of the GUI.
+Both features use one user unit:
 
-## Power-based profiles
+```text
+keyboard-backlight-automation.service
+```
 
-You can assign different profiles for AC power and battery operation:
+The daemon listens to login1 `PrepareForSleep(bool)` and UPower
+`PropertiesChanged` events. It does not synthesize user `sleep.target` units,
+poll the clock, or guess that a time jump means resume. Enabling either feature
+reconciles and restarts the managed unit so upgraded code is used immediately.
 
-1. Create the profiles you want (e.g., "Bright" for AC, "Dim" for battery).
-2. In the **Smart automations** section, use the "On AC" and "On Battery" dropdowns to assign profiles.
-3. Enable the **Power monitor** toggle.
+Useful diagnostics:
 
-When the power source changes, the monitor automatically switches to the configured profile and applies it. If no profile is assigned for a power state, the current active profile is used.
+```bash
+systemctl --user status keyboard-backlight-automation.service
+journalctl --user -u keyboard-backlight-automation.service -b
+ite8291r3-ctl query --devices
+```
 
-## Profile management
+The GUI log export creates an atomic ZIP containing the unified state,
+installer log when readable, driver information, automation journal, activity
+buffer, and a `collection-report.json` that lists collection errors explicitly.
 
-The **Quick profiles** card provides full profile management:
+## Development and verification
 
-- **New...** - Create a fresh profile with default settings (static white, brightness 40).
-- **Save** - Save changes to the current profile.
-- **Save as...** - Duplicate the current profile under a new name.
-- **Rename...** - Rename the active profile.
-- **Delete** - Remove the active profile (at least one must remain).
+Run the complete headless suite from the repository root:
 
-## Dark mode
+```bash
+python3 -m unittest discover -s tests -v
+python3 -m compileall -q install.py installer_lib source driver/src tests
+```
 
-Enable **Dark Mode** in the Smart automations section for a dark UI theme. The dark theme applies to the main window and all dialogs.
+The suite covers command capabilities, state verification, persistence and
+migration, profile transformations, automation events, service ownership,
+driver timeouts, diagnostics, installer transactions, artifact tampering,
+udev security, venv relocation, and offline wheel installation.
 
-## Testing resume restore
-
-1. Trigger a suspend/resume cycle from your desktop environment.
-2. After resume, confirm the keyboard lights restored automatically.
-3. Inspect the user service log for troubleshooting:
-   ```bash
-   journalctl --user -u keyboard-backlight-resume.service -b
-   ```
-
-If the keyboard stays dark but manual restore works (`cd /usr/share/xmg-backlight && python3 -m xmg_backlight.restore_profile`), inspect the log above to understand which phase failed.
-
-## Troubleshooting
-
-* **Permissions:** If `ite8291r3-ctl query --devices` fails with a permission error, verify `/etc/udev/rules.d/99-ite8291.rules`, then replug/reboot.
-* **Installer log:** The installer writes to `/var/log/xmg-backlight/installer.log` (removed on uninstall). GUI log exports include it when available.
-
-## Development workflow
-
-* Use the files under `source/xmg_backlight/` as the canonical application payload: modify them there, then re-run the installer to copy updates into `/usr/share/xmg-backlight`.
-* Keep the installer idempotent; re-running it should refresh deployed files without breaking existing installs.
-* When adding integrations (systemd user services, autostart), place the generator logic in `install.py` so deployments remain reproducible.
-* Run `python3 -m unittest discover -s tests` plus manual smoke tests: start the GUI, toggle automation, run suspend/resume, and inspect `journalctl --user -u keyboard-backlight-resume.service -b`.
-
-## Credits
-
-This installer/GUI bundle builds on top of the excellent [`pobrn/ite8291r3-ctl`](https://github.com/pobrn/ite8291r3-ctl) userspace driver.
-- **Driver and low-level tooling:** (c) Barnabás Pőcze and contributors (GPL licensed).
-- **GUI and automatic installer:** developed by @Darayavaush-84 to provide a PySide-based interface and user services that simplify deployments on XMG/Tongfang laptops.
+To rebuild the driver wheel, build from `driver/`, replace only the matching
+artifact under `vendor/`, and update its SHA-256 in `vendor/manifest.json`.
 
 ## License
 
-* **GUI and installer code** (authored by **Dario Barbarino**): released under the **GNU General Public License v3.0**.
-* **Underlying driver (`ite8291r3-ctl`)**: distributed under **GNU GPL v2.0** per the upstream project. Its license text is stored in [`source/LICENSE`](source/LICENSE).
+- GUI and installer: GNU GPL v3.0-only; see [`LICENSE`](LICENSE).
+- Bundled `ite8291r3-ctl` fork: GNU GPL v2.0-only; see
+  [`driver/LICENSE`](driver/LICENSE).
 
-**License note (driver):** `ite8291r3-ctl` is a separate GPL v2.0-only project. This repository ships its source and installs the driver via pip; the GUI only invokes the CLI and does not import or link against the driver code. This is distributed as a separate component (mere aggregation), so the GUI remains GPL v3.0 while the driver remains GPL v2.0. If you modify the driver, those changes must remain GPL v2.0 and be redistributed accordingly.
-
-When contributing, keep your changes compatible with GPL v3 for the GUI/installer and respect the upstream GPL v2 requirements for the driver portion.
+The driver is distributed as a separate command-line component. The GUI invokes
+its executable and does not import or link its Python package.

@@ -1,25 +1,36 @@
 from __future__ import annotations
 
-import json
 import os
-import subprocess
-import time
+from copy import deepcopy
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
-from .constants import *
-from .driver import TOOL, apply_effect_with_fallback, format_cli_error, format_log, run_cmd
-from .services import *
-from .storage import *
-from .translations import detect_system_language, load_translations
-from .ui_helpers import build_flag_icon, clamp_int, normalize_language_code, sanitize_choice, set_combo_by_data
+from .capabilities import DIRECTIONS, DYNAMIC_COLORS, EFFECTS, STATIC_COLORS
+from .constants import CONFIG_DIR, DEFAULT_PROFILE_STATE, STATE_PATH
+from .profile_logic import delete_profile, rename_profile
+from .storage import (
+    ProfileConflictError,
+    StorageFormatError,
+    ensure_config_dir,
+    load_profile_store,
+    write_profile_and_settings,
+    write_profile_store,
+    write_settings_file,
+)
+from .ui_helpers import clamp_int, sanitize_choice, set_combo_by_data
 
 class ProfileMixin:
     def save_settings(self):
         try:
             write_settings_file(self.settings)
-        except OSError as exc:
-            self.log(f"Failed to save settings: {exc}", level="error")
+        except (OSError, StorageFormatError) as exc:
+            message = self.tr("status.settings_save_failed", error=str(exc))
+            if hasattr(self, "console"):
+                self.set_status(message, level="error")
+            else:
+                self._pending_settings_error = message
+            return False
+        return True
 
     def refresh_power_profile_combos(self):
         if not hasattr(self, "ac_profile_combo") or not hasattr(self, "battery_profile_combo"):
@@ -58,8 +69,12 @@ class ProfileMixin:
         value = self.ac_profile_combo.currentData() or ""
         if self.settings.get("ac_profile") == value:
             return
+        previous = self.settings.get("ac_profile", "")
         self.settings["ac_profile"] = value
-        self.save_settings()
+        if not self.save_settings():
+            self.settings["ac_profile"] = previous
+            self.refresh_power_profile_combos()
+            return
         self.set_status(
             self.tr("status.ac_profile_set", profile=self.ac_profile_combo.currentText())
         )
@@ -68,8 +83,12 @@ class ProfileMixin:
         value = self.battery_profile_combo.currentData() or ""
         if self.settings.get("battery_profile") == value:
             return
+        previous = self.settings.get("battery_profile", "")
         self.settings["battery_profile"] = value
-        self.save_settings()
+        if not self.save_settings():
+            self.settings["battery_profile"] = previous
+            self.refresh_power_profile_combos()
+            return
         self.set_status(
             self.tr(
                 "status.battery_profile_set",
@@ -104,7 +123,7 @@ class ProfileMixin:
                 set_combo_by_data(self.mode, "static")
 
             static_value = sanitize_choice(
-                data.get("static_color"), COLORS, self.last_static_color
+                data.get("static_color"), STATIC_COLORS, self.last_static_color
             )
             if not set_combo_by_data(self.static_color, static_value):
                 set_combo_by_data(self.static_color, self.last_static_color)
@@ -113,7 +132,7 @@ class ProfileMixin:
             self.speed.setValue(clamp_int(data.get("speed"), 0, 10, self.speed.value()))
 
             color_value = data.get("color") or "none"
-            if color_value != "none" and color_value not in COLORS:
+            if color_value != "none" and color_value not in DYNAMIC_COLORS:
                 color_value = "none"
             set_combo_by_data(self.color, color_value)
 
@@ -183,7 +202,8 @@ class ProfileMixin:
         message.setDefaultButton(QtWidgets.QMessageBox.Save)
         choice = message.exec()
         if choice == QtWidgets.QMessageBox.Save:
-            self.persist_profile()
+            if not self.persist_profile():
+                return False
             self.set_status(
                 self.tr("status.profile_saved", name=self.active_profile_name)
             )
@@ -206,8 +226,7 @@ class ProfileMixin:
             saved_state.get("brightness"), 0, 50, self.last_brightness
         )
         if brightness <= 0:
-            self.is_off = True
-            self.run_cli(["off"], log_cmd=False, log_stdout=False, log_stderr=False)
+            self.on_power_off()
         else:
             self.is_off = False
             self.apply_current_mode()
@@ -219,12 +238,12 @@ class ProfileMixin:
     def capture_profile_state(self):
         mode_value = sanitize_choice(self.mode.currentData(), EFFECTS, "static")
         static_value = sanitize_choice(
-            self.static_color.currentData(), COLORS, self.last_static_color
+            self.static_color.currentData(), STATIC_COLORS, self.last_static_color
         )
         self.last_static_color = static_value
 
         color_value = self.color.currentData() or "none"
-        if color_value != "none" and color_value not in COLORS:
+        if color_value != "none" and color_value not in DYNAMIC_COLORS:
             color_value = "none"
 
         direction_value = self.direction.currentData()
@@ -247,9 +266,14 @@ class ProfileMixin:
 
     def persist_profile(self):
         state = self.capture_profile_state()
-        self.update_active_profile_state(state)
-        self.save_profile_store()
+        candidate = deepcopy(self.profile_store)
+        candidate["profiles"][self.active_profile_name] = dict(state)
+        candidate["active"] = self.active_profile_name
+        if not self._commit_profile_store(candidate):
+            return False
+        self.profile_data = dict(state)
         self.set_profile_dirty(False)
+        return True
 
     def update_active_profile_state(self, state):
         self.profile_store["profiles"][self.active_profile_name] = dict(state)
@@ -257,15 +281,53 @@ class ProfileMixin:
         self.profile_data = dict(state)
 
     def save_profile_store(self):
+        return self._commit_profile_store(deepcopy(self.profile_store))
+
+    def _commit_profile_store(self, candidate):
         try:
             self._ignore_profile_events = True
-            write_profile_store(self.profile_store)
+            persisted = write_profile_store(
+                candidate,
+                expected_revision=self.profile_store.get("revision", 0),
+            )
+            self.profile_store = persisted
+            self.active_profile_name = persisted["active"]
+            self.profile_data = dict(
+                persisted["profiles"][self.active_profile_name]
+            )
             self.watch_profile_paths()
-        except OSError as exc:
+            return True
+        except (OSError, ProfileConflictError, ValueError) as exc:
             self.set_status(
                 self.tr("status.profile_save_failed", error=str(exc)),
                 level="error",
             )
+            return False
+        finally:
+            self._ignore_profile_events = False
+
+    def _commit_profile_and_settings(self, candidate_store, candidate_settings):
+        try:
+            self._ignore_profile_events = True
+            persisted_store, persisted_settings = write_profile_and_settings(
+                candidate_store,
+                candidate_settings,
+                expected_profile_revision=self.profile_store.get("revision", 0),
+            )
+            self.profile_store = persisted_store
+            self.settings = persisted_settings
+            self.active_profile_name = persisted_store["active"]
+            self.profile_data = dict(
+                persisted_store["profiles"][self.active_profile_name]
+            )
+            self.watch_profile_paths()
+            return True
+        except (OSError, ProfileConflictError, StorageFormatError) as exc:
+            self.set_status(
+                self.tr("status.profile_save_failed", error=str(exc)),
+                level="error",
+            )
+            return False
         finally:
             self._ignore_profile_events = False
 
@@ -299,7 +361,7 @@ class ProfileMixin:
         if not ok:
             return None
         name = text.strip()
-        if not name:
+        if not name or len(name) > 128:
             QtWidgets.QMessageBox.warning(
                 self,
                 self.tr("dialogs.profile.invalid_title"),
@@ -309,13 +371,14 @@ class ProfileMixin:
         return name
 
     def on_profile_save_clicked(self):
-        self.persist_profile()
-        self.set_status(self.tr("status.profile_saved", name=self.active_profile_name))
+        if self.persist_profile():
+            self.set_status(self.tr("status.profile_saved", name=self.active_profile_name))
 
     def on_apply_clicked(self):
         self.apply_timer.stop()
         self.brightness_timer.stop()
-        self.persist_profile()
+        if not self.persist_profile():
+            return
         if not self.is_off:
             self.apply_current_mode()
         self.set_status(self.tr("status.profile_updated", name=self.active_profile_name))
@@ -334,11 +397,11 @@ class ProfileMixin:
                 self.tr("dialogs.profile.name_in_use_message"),
             )
             return
-        self.profile_store["profiles"][name] = dict(DEFAULT_PROFILE_STATE)
-        self.active_profile_name = name
-        self.profile_store["active"] = name
-        self.profile_data = dict(DEFAULT_PROFILE_STATE)
-        self.save_profile_store()
+        candidate = deepcopy(self.profile_store)
+        candidate["profiles"][name] = dict(DEFAULT_PROFILE_STATE)
+        candidate["active"] = name
+        if not self._commit_profile_store(candidate):
+            return
         self.refresh_profile_combo()
         self.load_profile_into_controls(self.profile_data)
         self.set_status(self.tr("status.profile_created", name=name))
@@ -359,10 +422,12 @@ class ProfileMixin:
             )
             if reply != QtWidgets.QMessageBox.Yes:
                 return
-        self.active_profile_name = name
         state = self.capture_profile_state()
-        self.update_active_profile_state(state)
-        self.save_profile_store()
+        candidate = deepcopy(self.profile_store)
+        candidate["active"] = name
+        candidate["profiles"][name] = dict(state)
+        if not self._commit_profile_store(candidate):
+            return
         self.refresh_profile_combo()
         self.set_profile_dirty(False)
         self.set_status(self.tr("status.profile_saved", name=name))
@@ -382,13 +447,12 @@ class ProfileMixin:
                 self.tr("dialogs.profile.rename_in_use_message"),
             )
             return
-        self.profile_store["profiles"][new_name] = self.profile_store["profiles"].pop(
-            self.active_profile_name
+        old_name = self.active_profile_name
+        candidate, candidate_settings = rename_profile(
+            self.profile_store, self.settings, old_name, new_name
         )
-        self.active_profile_name = new_name
-        self.profile_store["active"] = new_name
-        self.profile_data = dict(self.profile_store["profiles"][new_name])
-        self.save_profile_store()
+        if not self._commit_profile_and_settings(candidate, candidate_settings):
+            return
         self.refresh_profile_combo()
         self.set_status(self.tr("status.profile_renamed", name=new_name))
 
@@ -407,11 +471,12 @@ class ProfileMixin:
         )
         if reply != QtWidgets.QMessageBox.Yes:
             return
-        del self.profile_store["profiles"][self.active_profile_name]
-        self.active_profile_name = next(iter(self.profile_store["profiles"].keys()))
-        self.profile_store["active"] = self.active_profile_name
-        self.profile_data = dict(self.profile_store["profiles"][self.active_profile_name])
-        self.save_profile_store()
+        deleted_name = self.active_profile_name
+        candidate, candidate_settings = delete_profile(
+            self.profile_store, self.settings, deleted_name
+        )
+        if not self._commit_profile_and_settings(candidate, candidate_settings):
+            return
         self.refresh_profile_combo()
         self.load_profile_into_controls(self.profile_data)
         self.set_status(
@@ -420,7 +485,12 @@ class ProfileMixin:
         if not self.is_off:
             self.apply_current_mode()
 
-    def switch_active_profile(self, name, triggered_by_user=False):
+    def switch_active_profile(
+        self,
+        name,
+        triggered_by_user=False,
+        completion=None,
+    ):
         if name not in self.profile_store["profiles"]:
             self.set_status(self.tr("status.profile_not_found", name=name), level="error")
             self.refresh_profile_combo()
@@ -428,15 +498,22 @@ class ProfileMixin:
         if triggered_by_user and not self.confirm_profile_switch(name):
             self.refresh_profile_combo()
             return False
-        self.active_profile_name = name
-        self.profile_store["active"] = name
-        self.profile_data = dict(self.profile_store["profiles"][name])
-        self.save_profile_store()
+        candidate = deepcopy(self.profile_store)
+        candidate["active"] = name
+        if not self._commit_profile_store(candidate):
+            self.refresh_profile_combo()
+            return False
         self.refresh_profile_combo()
         self.load_profile_into_controls(self.profile_data)
         self.set_status(self.tr("status.profile_loaded", name=name))
         if triggered_by_user and not self.is_off:
-            self.apply_current_mode()
+            self.apply_current_mode(
+                on_success=(
+                    (lambda: completion(True)) if completion else None
+                )
+            )
+        elif completion:
+            completion(True)
         return True
 
     def watch_profile_paths(self):
@@ -451,14 +528,15 @@ class ProfileMixin:
         targets = []
         if os.path.isdir(CONFIG_DIR):
             targets.append(CONFIG_DIR)
-        if os.path.isfile(PROFILE_PATH):
-            targets.append(PROFILE_PATH)
+        if os.path.isfile(STATE_PATH):
+            targets.append(STATE_PATH)
 
         for target in targets:
             self.profile_watcher.addPath(target)
 
     def reload_profile_store_from_disk(self, announce=True):
         self.profile_store = load_profile_store()
+        self._external_profile_change_pending = False
         self.active_profile_name = self.profile_store["active"]
         self.profile_data = dict(self.profile_store["profiles"][self.active_profile_name])
         self.refresh_profile_combo()
@@ -466,16 +544,27 @@ class ProfileMixin:
             self.load_profile_into_controls(self.profile_data)
 
     def on_profile_file_changed(self, path):
-        if path != PROFILE_PATH:
+        if path != STATE_PATH:
             return
         if self._ignore_profile_events:
             self.watch_profile_paths()
             return
         self.watch_profile_paths()
         try:
+            disk_store = load_profile_store()
+            if disk_store.get("revision") == self.profile_store.get("revision"):
+                return
+            self.refresh_profile_dirty_state()
+            if self._profile_dirty:
+                self._external_profile_change_pending = True
+                self.set_status(
+                    self.tr("status.profiles_reload_failed", error="external changes pending"),
+                    level="error",
+                )
+                return
             self.reload_profile_store_from_disk(announce=True)
             self.set_status(self.tr("status.profiles_reloaded"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, StorageFormatError) as exc:
             self.set_status(
                 self.tr("status.profiles_reload_failed", error=str(exc)),
                 level="error",
@@ -488,11 +577,22 @@ class ProfileMixin:
             self.watch_profile_paths()
             return
         self.watch_profile_paths()
-        if os.path.isfile(PROFILE_PATH):
+        if os.path.isfile(STATE_PATH):
             try:
+                disk_store = load_profile_store()
+                if disk_store.get("revision") == self.profile_store.get("revision"):
+                    return
+                self.refresh_profile_dirty_state()
+                if self._profile_dirty:
+                    self._external_profile_change_pending = True
+                    self.set_status(
+                        self.tr("status.profiles_reload_failed", error="external changes pending"),
+                        level="error",
+                    )
+                    return
                 self.reload_profile_store_from_disk(announce=True)
                 self.set_status(self.tr("status.profiles_updated"))
-            except (OSError, json.JSONDecodeError) as exc:
+            except (OSError, StorageFormatError) as exc:
                 self.set_status(
                     self.tr("status.profiles_reload_failed", error=str(exc)),
                     level="error",

@@ -2,75 +2,60 @@
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
+def iter_udev_records(existing_text: str):
+    """Yield logical udev records, joining backslash-continued physical lines."""
+    parts = []
+    for raw_line in existing_text.splitlines():
+        line = raw_line.strip()
+        if not line or (line.startswith("#") and not parts):
+            continue
+        continued = line.endswith("\\")
+        parts.append(line[:-1].rstrip() if continued else line)
+        if not continued:
+            yield " ".join(parts)
+            parts.clear()
+    if parts:
+        yield " ".join(parts)
 
-DeviceId = tuple[str, str]
 
-
-@dataclass(frozen=True)
-class DeviceIdParseResult:
-    ids: list[DeviceId]
-    unmatched: list[str]
-
-
-def parse_device_id_lines(lines: list[str]) -> DeviceIdParseResult:
-    ids: list[DeviceId] = []
-    unmatched: list[str] = []
-    vendor_patterns = [
-        r"\bidvendor\s*[:=]?\s*(?:0x)?([0-9a-fA-F]{4})\b",
-        r"\bvendor\s*[:=]?\s*(?:0x)?([0-9a-fA-F]{4})\b",
-        r"\bmanufacturer\s*[:=]?\s*(?:0x)?([0-9a-fA-F]{4})\b",
-    ]
-    product_patterns = [
-        r"\bidproduct\s*[:=]?\s*(?:0x)?([0-9a-fA-F]{4})\b",
-        r"\bproduct\s*[:=]?\s*(?:0x)?([0-9a-fA-F]{4})\b",
-    ]
-    pair_patterns = [
-        r"\bid\s+(?:0x)?([0-9a-fA-F]{4})\s*:\s*(?:0x)?([0-9a-fA-F]{4})\b",
-        r"\b(?:0x)?([0-9a-fA-F]{4})\s*:\s*(?:0x)?([0-9a-fA-F]{4})\b",
-    ]
-    for line in lines:
-        vendor = None
-        product = None
-        for pattern in vendor_patterns:
-            match = re.search(pattern, line, flags=re.IGNORECASE)
-            if match:
-                vendor = match.group(1)
-                break
-        for pattern in product_patterns:
-            match = re.search(pattern, line, flags=re.IGNORECASE)
-            if match:
-                product = match.group(1)
-                break
-        if not (vendor and product):
-            for pattern in pair_patterns:
-                match = re.search(pattern, line, flags=re.IGNORECASE)
-                if match:
-                    vendor = match.group(1)
-                    product = match.group(2)
-                    break
-        if vendor and product:
-            ids.append((vendor.lower().zfill(4), product.lower().zfill(4)))
-        else:
-            stripped = line.strip()
-            if stripped:
-                unmatched.append(stripped)
-    return DeviceIdParseResult(ids=list(dict.fromkeys(ids)), unmatched=unmatched)
+def _record_matches_device(record: str, vendor: str, product: str) -> bool:
+    record = record.lower()
+    vendor = vendor.lower()
+    product = product.lower()
+    vendor_tokens = (
+        f'attr{{idvendor}}=="{vendor}"',
+        f'attrs{{idvendor}}=="{vendor}"',
+    )
+    product_tokens = (
+        f'attr{{idproduct}}=="{product}"',
+        f'attrs{{idproduct}}=="{product}"',
+    )
+    return any(token in record for token in vendor_tokens) and any(
+        token in record for token in product_tokens
+    )
 
 
 def existing_rule_contains_device(existing_text: str, vendor: str, product: str) -> bool:
-    return (
-        f'ATTRS{{idVendor}}=="{vendor}"' in existing_text
-        and f'ATTRS{{idProduct}}=="{product}"' in existing_text
-    )
+    for record in iter_udev_records(existing_text):
+        if _record_matches_device(record, vendor, product):
+            return True
+    return False
+
+
+def rule_grants_world_write(existing_text: str, vendor: str, product: str) -> bool:
+    for record in iter_udev_records(existing_text):
+        compact = "".join(record.lower().split())
+        if _record_matches_device(record, vendor, product) and (
+            'mode="0666"' in compact or 'mode:="0666"' in compact
+        ):
+            return True
+    return False
 
 
 def format_udev_rule(vendor: str, product: str) -> str:
     return (
-        'SUBSYSTEMS=="usb", '
-        f'ATTRS{{idVendor}}=="{vendor}", '
-        f'ATTRS{{idProduct}}=="{product}", '
-        'MODE:="0666"'
+        'SUBSYSTEM=="usb", '
+        f'ATTR{{idVendor}}=="{vendor}", '
+        f'ATTR{{idProduct}}=="{product}", '
+        'TAG+="uaccess"'
     )
-

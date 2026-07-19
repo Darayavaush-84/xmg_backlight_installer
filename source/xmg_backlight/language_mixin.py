@@ -1,18 +1,11 @@
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import time
+from PySide6 import QtCore
 
-from PySide6 import QtCore, QtGui, QtWidgets
-
-from .constants import *
-from .driver import TOOL, apply_effect_with_fallback, format_cli_error, format_log, run_cmd
-from .services import *
-from .storage import *
-from .translations import detect_system_language, load_translations
-from .ui_helpers import build_flag_icon, clamp_int, normalize_language_code, sanitize_choice, set_combo_by_data
+from .capabilities import DIRECTIONS, DYNAMIC_COLORS, EFFECTS, STATIC_COLORS
+from .constants import AUTOSTART_ENTRY, LANGUAGE_LABELS
+from .translations import load_translations
+from .ui_helpers import normalize_language_code, set_combo_by_data
 
 class LanguageMixin:
     def tr(self, key, **kwargs):
@@ -30,8 +23,10 @@ class LanguageMixin:
             lang = "en"
         if lang == self.language and self.translations:
             if save:
+                previous_language = self.settings.get("language", "")
                 self.settings["language"] = lang
-                self.save_settings()
+                if not self.save_settings():
+                    self.settings["language"] = previous_language
             return
         self.language = lang
         self.translations = load_translations(lang)
@@ -45,8 +40,10 @@ class LanguageMixin:
             finally:
                 del blocker
         if save:
+            previous_language = self.settings.get("language", "")
             self.settings["language"] = lang
-            self.save_settings()
+            if not self.save_settings():
+                self.settings["language"] = previous_language
         self.apply_language()
 
     def refresh_effect_combos(self):
@@ -66,13 +63,13 @@ class LanguageMixin:
             set_combo_by_data(self.mode, mode_value)
 
             self.static_color.clear()
-            for color in COLORS:
+            for color in STATIC_COLORS:
                 self.static_color.addItem(self.tr(f"color.{color}"), color)
             set_combo_by_data(self.static_color, static_value)
 
             self.color.clear()
             self.color.addItem(self.tr("color.none"), "none")
-            for color in COLORS:
+            for color in DYNAMIC_COLORS:
                 self.color.addItem(self.tr(f"color.{color}"), color)
             set_combo_by_data(self.color, color_value)
 

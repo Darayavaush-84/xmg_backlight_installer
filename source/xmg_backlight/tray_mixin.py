@@ -1,18 +1,8 @@
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import time
+from PySide6 import QtCore, QtWidgets
 
-from PySide6 import QtCore, QtGui, QtWidgets
-
-from .constants import *
-from .driver import TOOL, apply_effect_with_fallback, format_cli_error, format_log, run_cmd
-from .services import *
-from .storage import *
-from .translations import detect_system_language, load_translations
-from .ui_helpers import build_flag_icon, clamp_int, normalize_language_code, sanitize_choice, set_combo_by_data
+from .constants import APP_DISPLAY_NAME, NOTIFICATION_TIMEOUT_MS
 
 class TrayMixin:
     def notify(self, title, message, *, icon=QtWidgets.QSystemTrayIcon.Information):
@@ -57,12 +47,18 @@ class TrayMixin:
         self.activateWindow()
 
     def on_tray_turn_on(self):
-        self.on_power_on()
-        self.notify(APP_DISPLAY_NAME, self.tr("notify.backlight_on"))
+        self.on_power_on(
+            lambda: self.notify(
+                APP_DISPLAY_NAME, self.tr("notify.backlight_on")
+            )
+        )
 
     def on_tray_turn_off(self):
-        self.on_power_off()
-        self.notify(APP_DISPLAY_NAME, self.tr("notify.backlight_off"))
+        self.on_power_off(
+            lambda: self.notify(
+                APP_DISPLAY_NAME, self.tr("notify.backlight_off")
+            )
+        )
 
     def rebuild_tray_profiles_menu(self):
         if not hasattr(self, "tray_profiles_menu"):
@@ -76,14 +72,26 @@ class TrayMixin:
 
     def on_tray_profile_selected(self, name):
         if name == self.active_profile_name:
-            self.restore_profile_after_startup()
-            self.notify(APP_DISPLAY_NAME, self.tr("notify.profile_reapplied", name=name))
+            self.restore_profile_after_startup(
+                lambda success: success
+                and self.notify(
+                    APP_DISPLAY_NAME,
+                    self.tr("notify.profile_reapplied", name=name),
+                )
+            )
             return
-        if not self.switch_active_profile(name, triggered_by_user=True):
+        if not self.switch_active_profile(
+            name,
+            triggered_by_user=True,
+            completion=lambda success: success
+            and self.notify(
+                APP_DISPLAY_NAME,
+                self.tr("notify.profile_applied", name=name),
+            ),
+        ):
             self.rebuild_tray_profiles_menu()
             return
         self.rebuild_tray_profiles_menu()
-        self.notify(APP_DISPLAY_NAME, self.tr("notify.profile_applied", name=name))
 
     def on_tray_quit(self):
         self._quitting = True
@@ -144,5 +152,12 @@ class TrayMixin:
         checked = bool(checked)
         if self.settings.get("show_notifications") == checked:
             return
+        previous = self.settings.get("show_notifications", True)
         self.settings["show_notifications"] = checked
-        self.save_settings()
+        if not self.save_settings():
+            self.settings["show_notifications"] = previous
+            blocker = QtCore.QSignalBlocker(self.notifications_checkbox)
+            try:
+                self.notifications_checkbox.setChecked(previous)
+            finally:
+                del blocker

@@ -1,26 +1,22 @@
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import time
-
-from PySide6 import QtCore, QtGui, QtWidgets
-
-from .constants import *
-from .driver import TOOL, apply_effect_with_fallback, format_cli_error, format_log, run_cmd
-from .services import *
-from .storage import *
-from .translations import detect_system_language, load_translations
-from .ui_helpers import build_flag_icon, clamp_int, normalize_language_code, sanitize_choice, set_combo_by_data
+from PySide6 import QtCore, QtWidgets
 
 class ThemeMixin:
     def on_dark_mode_toggled(self, checked):
         checked = bool(checked)
         if self.settings.get("dark_mode") == checked:
             return
+        previous = self.settings.get("dark_mode", True)
         self.settings["dark_mode"] = checked
-        self.save_settings()
+        if not self.save_settings():
+            self.settings["dark_mode"] = previous
+            blocker = QtCore.QSignalBlocker(self.dark_mode_checkbox)
+            try:
+                self.dark_mode_checkbox.setChecked(previous)
+            finally:
+                del blocker
+            return
         self.apply_styles()
 
     def apply_styles(self):
@@ -520,4 +516,7 @@ class ThemeMixin:
                 view.setStyleSheet(f"background-color: {bg_color}; color: {text_color}; border: none;")
                 parent = view.parentWidget()
                 if parent:
-                    parent.setStyleSheet(f"background-color: {bg_color}; border: 1px solid rgba(148, 163, 184, 0.3);")
+                    parent.setStyleSheet(
+                        f"background-color: {bg_color}; "
+                        "border: 1px solid rgba(148, 163, 184, 0.3);"
+                    )
